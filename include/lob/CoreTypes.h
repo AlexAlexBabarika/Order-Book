@@ -1,0 +1,32 @@
+#pragma once
+#include <cmath>
+#include <cstdint>
+#include <string>
+
+namespace lob {
+
+typedef std::int64_t Price;
+typedef std::uint64_t OrderId;
+typedef std::int64_t Qty;
+
+const Price MAX_TICK_LEN = 2;
+const Price TICK_FACTOR = pow(10, MAX_TICK_LEN);
+
+enum class Side : bool { Buy, Sell };
+enum class Tif : std::uint8_t { Gtc, Ioc, Fok, Day };
+
+struct Order {
+    OrderId id;
+    Side side;
+    Price price;
+    Qty qty;
+    Tif tif;
+};
+
+// struct CancelOrder {
+//     OrderId id;
+// };
+
+std::string formatRawPrice(Price price);
+
+}  // namespace lob
