@@ -26,6 +26,7 @@ struct Order {
 struct OrderLocation {
     Side side;
     Price price;
+    Tif tif;
     std::list<Order>::iterator iter;
 };
 //

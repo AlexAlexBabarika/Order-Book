@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 project(lob LANGUAGES CXX)
 
-add_library(lob src/lob_version.cpp src/CoreTypes.cpp)
+add_library(lob src/lob_version.cpp src/CoreTypes.cpp src/OrderBook.cpp)
 target_include_directories(lob PUBLIC include)
 
 add_executable(lob_app app/main.cpp)
