@@ -14,6 +14,7 @@ const Price TICK_FACTOR = pow(10, MAX_TICK_LEN);
 
 enum class Side { Buy, Sell };
 enum class Tif : std::uint8_t { Gtc, Ioc, Fok, Day };
+enum class OrderType : std::uint8_t { Market, Limit };
 
 struct Order {
     OrderId id;
@@ -21,6 +22,7 @@ struct Order {
     Price price;
     Qty qty;
     Tif tif;
+    OrderType type = OrderType::Limit;
 };
 
 struct OrderLocation {
