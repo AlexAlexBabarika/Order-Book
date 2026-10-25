@@ -28,6 +28,7 @@ class OrderBook {
     void remove(const OrderId id);
     LookupIter erase_order(LookupIter iter);
     bool checkOrder(const Order& order);
+    static bool crosses(const Order& incoming, const Price price);
 };
 
 }  // namespace lob

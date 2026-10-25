@@ -56,7 +56,6 @@ void OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQty)
 
     Order& resting = *iter->second.iter;
 
-    // Same price and no size increase keeps time priority; anything else requeues.
     if (newPrice == resting.price && newQty <= resting.qty) {
         resting.qty = newQty;
         return;
@@ -138,4 +137,10 @@ bool OrderBook::checkOrder(const Order& order) {
     return true;
 }
 
+bool OrderBook::crosses(const Order& incoming, const Price price) {
+    if (incoming.type == OrderType::Market) {
+        return true;
+    }
+    return incoming.side == Side::Buy ? incoming.price >= price : incoming.price <= price;
+}
 }  // namespace lob
