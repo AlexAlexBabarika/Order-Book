@@ -41,6 +41,35 @@ void OrderBook::add(const Order& order) {
 
 void OrderBook::cancel(const OrderId id) { remove(id); }
 
+void OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQty) {
+    auto iter = order_lookup.find(id);
+
+    if (iter == order_lookup.end()) {
+        std::cout << "Error: Order ID " << id << " doesn't exist.\n";
+        return;
+    }
+
+    if (newQty <= 0) {
+        erase_order(iter);
+        return;
+    }
+
+    Order& resting = *iter->second.iter;
+
+    // Same price and no size increase keeps time priority; anything else requeues.
+    if (newPrice == resting.price && newQty <= resting.qty) {
+        resting.qty = newQty;
+        return;
+    }
+
+    Order updated = resting;
+    updated.price = newPrice;
+    updated.qty = newQty;
+
+    erase_order(iter);
+    add(updated);
+}
+
 Price OrderBook::best_bid() {
     if (bid_map.empty()) {
         std::cout << "Bids are empty. Returning INT64_MIN.\n";
