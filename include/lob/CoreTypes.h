@@ -20,15 +20,23 @@ struct Order {
     OrderId id;
     Side side;
     Price price;
-    Qty qty;
+    Qty original;
+    // A new order is unfilled, so filled = original - remaining = 0
+    Qty remaining = original;
     Tif tif;
     OrderType type = OrderType::Limit;
+};
+
+struct Level {
+    std::list<Order> orders;
+    Qty total = 0;
 };
 
 struct OrderLocation {
     Side side;
     Price price;
     Tif tif;
+    Level* level;
     std::list<Order>::iterator iter;
 };
 //

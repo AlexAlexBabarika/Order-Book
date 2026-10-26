@@ -11,11 +11,24 @@ namespace lob {
 namespace {
 
 template <typename Book>
+OrderLocation add_to_level(Book& book, const Order& order) {
+    Level& level = book[order.price];
+    level.orders.push_back(order);
+    level.total += order.remaining;
+    return {.side = order.side,
+            .price = order.price,
+            .tif = order.tif,
+            .level = &level,
+            .iter = std::prev(level.orders.end())};
+}
+
+template <typename Book>
 void erase_from_level(Book& book, const OrderLocation& loc) {
-    auto level = book.find(loc.price);
-    level->second.erase(loc.iter);
-    if (level->second.empty()) {
-        book.erase(level);
+    Level& level = *loc.level;
+    level.total -= loc.iter->remaining;
+    level.orders.erase(loc.iter);
+    if (level.orders.empty()) {
+        book.erase(loc.price);
     }
 }
 
@@ -27,15 +40,9 @@ void OrderBook::add(const Order& order) {
     }
 
     if (order.side == Side::Buy) {
-        bid_map[order.price].push_back(order);
-        auto iter = std::prev(bid_map[order.price].end());
-        order_lookup[order.id] = {
-            .side = order.side, .price = order.price, .tif = order.tif, .iter = iter};
+        order_lookup[order.id] = add_to_level(bid_map, order);
     } else {
-        ask_map[order.price].push_back(order);
-        auto iter = std::prev(ask_map[order.price].end());
-        order_lookup[order.id] = {
-            .side = order.side, .price = order.price, .tif = order.tif, .iter = iter};
+        order_lookup[order.id] = add_to_level(ask_map, order);
     }
 }
 
@@ -55,15 +62,19 @@ void OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQty)
     }
 
     Order& resting = *iter->second.iter;
+    const Qty filled = resting.original - resting.remaining;
 
-    if (newPrice == resting.price && newQty <= resting.qty) {
-        resting.qty = newQty;
+    if (newPrice == resting.price && newQty <= resting.remaining) {
+        iter->second.level->total -= resting.remaining - newQty;
+        resting.remaining = newQty;
+        resting.original = filled + newQty;
         return;
     }
 
     Order updated = resting;
     updated.price = newPrice;
-    updated.qty = newQty;
+    updated.original = filled + newQty;
+    updated.remaining = newQty;
 
     erase_order(iter);
     add(updated);
@@ -128,9 +139,15 @@ bool OrderBook::checkOrder(const Order& order) {
         return false;
     }
 
-    if (order.qty <= 0) {
+    if (order.remaining <= 0) {
         std::cout << "Error: Order Id " << order.id
                   << " Can't create an order with quantity smaller or equal to zero.\n";
+        return false;
+    }
+
+    if (order.remaining > order.original) {
+        std::cout << "Error: Order Id " << order.id
+                  << " Remaining quantity can't be larger than the original quantity.\n";
         return false;
     }
 
