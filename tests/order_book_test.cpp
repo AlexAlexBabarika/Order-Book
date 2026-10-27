@@ -1,9 +1,17 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <ostream>
 #include <vector>
 
 #include "lob/OrderBook.h"
+
+namespace lob {
+void PrintTo(const Fill& fill, std::ostream* os) {
+    *os << "{maker " << fill.maker << ", taker " << fill.taker << ", price " << fill.price
+        << ", qty " << fill.qty << "}";
+}
+}  // namespace lob
 
 namespace {
 using namespace lob;
@@ -229,5 +237,128 @@ TEST(OrderBook, ManyOrdersAddedAndCancelledLeaveBookEmpty) {
     EXPECT_EQ(book.size(), 0u);
     EXPECT_EQ(book.best_bid(), INT64_MIN);
     EXPECT_EQ(book.best_ask(), INT64_MAX);
+}
+
+// Asks: 1 (5) and 2 (7) at 100, 3 (4) at 101, 4 (6) at 103
+// Bids: 5 (3) at 98, 6 (2) at 97
+class Ladder : public ::testing::Test {
+   protected:
+    Ladder() {
+        book.add(sell(1, 100, 5));
+        book.add(sell(2, 100, 7));
+        book.add(sell(3, 101, 4));
+        book.add(sell(4, 103, 6));
+        book.add(buy(5, 98, 3));
+        book.add(buy(6, 97, 2));
+    }
+
+    Qty take(Order incoming) {
+        book.match(incoming, [this](const Fill& fill) { fills.push_back(fill); });
+        return incoming.remaining;
+    }
+
+    lob::OrderBook book;
+    std::vector<Fill> fills;
+};
+
+TEST_F(Ladder, FullFillRemovesMaker) {
+    EXPECT_EQ(take(buy(10, 100, 5)), 0);
+    EXPECT_EQ(fills, (std::vector<Fill>{{.maker = 1, .taker = 10, .price = 100, .qty = 5}}));
+    EXPECT_FALSE(book.contains(1));
+    EXPECT_EQ(book.orders_at(Side::Sell, 100), (std::vector<OrderId>{2}));
+    EXPECT_EQ(book.level_qty(Side::Sell, 100), 7);
+    EXPECT_EQ(book.size(), 5u);
+}
+
+TEST_F(Ladder, PartialFillKeepsMakerAtHead) {
+    EXPECT_EQ(take(buy(10, 100, 3)), 0);
+    EXPECT_EQ(fills, (std::vector<Fill>{{.maker = 1, .taker = 10, .price = 100, .qty = 3}}));
+    EXPECT_TRUE(book.contains(1));
+    EXPECT_EQ(book.orders_at(Side::Sell, 100), (std::vector<OrderId>{1, 2}));
+    EXPECT_EQ(book.level_qty(Side::Sell, 100), 9);
+}
+
+TEST_F(Ladder, CancelAfterPartialFillRemovesOnlyWhatWasLeft) {
+    ASSERT_EQ(take(buy(10, 100, 3)), 0);
+    book.cancel(1);
+    EXPECT_EQ(book.orders_at(Side::Sell, 100), (std::vector<OrderId>{2}));
+    EXPECT_EQ(book.level_qty(Side::Sell, 100), 7);
+}
+
+TEST_F(Ladder, FillsInArrivalOrderWithinLevel) {
+    EXPECT_EQ(take(buy(10, 100, 8)), 0);
+    EXPECT_EQ(fills, (std::vector<Fill>{{.maker = 1, .taker = 10, .price = 100, .qty = 5},
+                                        {.maker = 2, .taker = 10, .price = 100, .qty = 3}}));
+    EXPECT_EQ(book.orders_at(Side::Sell, 100), (std::vector<OrderId>{2}));
+    EXPECT_EQ(book.level_qty(Side::Sell, 100), 4);
+}
+
+TEST_F(Ladder, FillsAtMakerPrice) {
+    EXPECT_EQ(take(buy(10, 102, 3)), 0);
+    EXPECT_EQ(fills, (std::vector<Fill>{{.maker = 1, .taker = 10, .price = 100, .qty = 3}}));
+}
+
+TEST_F(Ladder, NoCrossNoFills) {
+    EXPECT_EQ(take(buy(10, 99, 5)), 5);
+    EXPECT_TRUE(fills.empty());
+    EXPECT_EQ(book.size(), 6u);
+    EXPECT_EQ(book.level_qty(Side::Sell, 100), 12);
+    EXPECT_EQ(book.best_ask(), 100);
+}
+
+TEST_F(Ladder, EmptyingLevelRemovesIt) {
+    EXPECT_EQ(take(buy(10, 100, 12)), 0);
+    EXPECT_EQ(fills.size(), 2u);
+    EXPECT_TRUE(book.orders_at(Side::Sell, 100).empty());
+    EXPECT_EQ(book.level_qty(Side::Sell, 100), 0);
+    EXPECT_EQ(book.best_ask(), 101);
+}
+
+TEST_F(Ladder, StopsAtLimitPriceAndDoesNotRest) {
+    EXPECT_EQ(take(buy(10, 100, 15)), 3);
+    EXPECT_EQ(fills.size(), 2u);
+    EXPECT_EQ(book.best_ask(), 101);
+    EXPECT_EQ(book.level_qty(Side::Sell, 101), 4);
+    EXPECT_FALSE(book.contains(10));
+    EXPECT_EQ(book.best_bid(), 98);
+}
+
+TEST_F(Ladder, SellMatchesAgainstBids) {
+    std::vector<Fill> got;
+    auto record = [&got](const Fill& fill) { got.push_back(fill); };
+    Order taker = sell(10, 98, 2);
+    book.match(taker, record);
+
+    EXPECT_EQ(taker.remaining, 0);
+    EXPECT_EQ(got, (std::vector<Fill>{{.maker = 5, .taker = 10, .price = 98, .qty = 2}}));
+    EXPECT_EQ(book.level_qty(Side::Buy, 98), 1);
+    EXPECT_EQ(book.level_qty(Side::Sell, 100), 12);
+}
+
+TEST_F(Ladder, BuySweepsLevelsUpToLimit) {
+    EXPECT_EQ(take(buy(10, 101, 20)), 4);
+    EXPECT_EQ(fills, (std::vector<Fill>{{.maker = 1, .taker = 10, .price = 100, .qty = 5},
+                                        {.maker = 2, .taker = 10, .price = 100, .qty = 7},
+                                        {.maker = 3, .taker = 10, .price = 101, .qty = 4}}));
+    EXPECT_EQ(book.best_ask(), 103);
+    EXPECT_EQ(book.level_qty(Side::Sell, 103), 6);
+    EXPECT_EQ(book.size(), 3u);
+}
+
+TEST_F(Ladder, SellSweepsBidsFromHighest) {
+    EXPECT_EQ(take(sell(10, 97, 4)), 0);
+    EXPECT_EQ(fills, (std::vector<Fill>{{.maker = 5, .taker = 10, .price = 98, .qty = 3},
+                                        {.maker = 6, .taker = 10, .price = 97, .qty = 1}}));
+    EXPECT_EQ(book.best_bid(), 97);
+    EXPECT_EQ(book.level_qty(Side::Buy, 97), 1);
+}
+
+TEST_F(Ladder, MarketOrderStopsWhenSideIsEmpty) {
+    Order taker = buy(10, 0, 25);
+    taker.type = OrderType::Market;
+    EXPECT_EQ(take(taker), 3);
+    EXPECT_EQ(fills.size(), 4u);
+    EXPECT_EQ(book.best_ask(), INT64_MAX);
+    EXPECT_EQ(book.size(), 2u);
 }
 }  // namespace
