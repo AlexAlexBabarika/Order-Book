@@ -1,5 +1,6 @@
 #include "lob/OrderBook.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <iterator>
@@ -30,6 +31,12 @@ void erase_from_level(Book& book, const OrderLocation& loc) {
     if (level.orders.empty()) {
         book.erase(loc.price);
     }
+}
+
+template <typename Book>
+const Level* find_level(const Book& book, const Price price) {
+    const auto iter = book.find(price);
+    return iter == book.end() ? nullptr : &iter->second;
 }
 
 }  // namespace
@@ -110,6 +117,29 @@ void OrderBook::end_session() {
     }
 }
 
+std::size_t OrderBook::size() const { return order_lookup.size(); }
+
+bool OrderBook::contains(OrderId id) const { return order_lookup.contains(id); }
+
+Qty OrderBook::level_qty(const Side side, const Price price) const {
+    const Level* level = level_at(side, price);
+    return level == nullptr ? 0 : level->total;
+}
+
+std::vector<OrderId> OrderBook::orders_at(const Side side, const Price price) const {
+    std::vector<OrderId> ids;
+    const Level* level = level_at(side, price);
+    if (level == nullptr) {
+        return ids;
+    }
+
+    ids.reserve(level->orders.size());
+    for (const Order& order : level->orders) {
+        ids.push_back(order.id);
+    }
+    return ids;
+}
+
 void OrderBook::remove(const OrderId id) {
     auto iter = order_lookup.find(id);
 
@@ -131,6 +161,10 @@ OrderBook::LookupIter OrderBook::erase_order(LookupIter iter) {
     }
 
     return order_lookup.erase(iter);
+}
+
+const Level* OrderBook::level_at(const Side side, const Price price) const {
+    return side == Side::Buy ? find_level(bid_map, price) : find_level(ask_map, price);
 }
 
 bool OrderBook::checkOrder(const Order& order) {
