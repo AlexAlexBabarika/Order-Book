@@ -1,6 +1,7 @@
 #pragma once
 #include <lob/CoreTypes.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <functional>
 #include <map>
@@ -24,6 +25,9 @@ class OrderBook {
     Qty level_qty(Side side, Price price) const;
     std::vector<OrderId> orders_at(Side side, Price price) const;
 
+    template <typename OnFill>
+    void match(Order& incoming, OnFill&& on_fill);
+
    private:
     using LookupIter = std::unordered_map<OrderId, OrderLocation>::iterator;
     std::unordered_map<OrderId, OrderLocation> order_lookup;
@@ -35,6 +39,14 @@ class OrderBook {
     const Level* level_at(const Side side, const Price price) const;
     bool checkOrder(const Order& order);
     static bool crosses(const Order& incoming, const Price price);
+
+    template <typename Book, typename OnFill>
+    void match_against(Book& book, Order& incoming, OnFill& on_fill);
 };
 
+template <typename Book, typename OnFill>
+void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {}
+
+template <typename OnFill>
+void OrderBook::match(Order& incoming, OnFill&& on_fill) {}
 }  // namespace lob

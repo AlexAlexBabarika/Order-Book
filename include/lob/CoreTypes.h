@@ -16,16 +16,44 @@ enum class Side { Buy, Sell };
 enum class Tif : std::uint8_t { Gtc, Ioc, Fok, Day };
 enum class OrderType : std::uint8_t { Market, Limit };
 
+enum class Result : std::uint8_t { Ok, DuplicateId, UnknownId, BadQty, BookFull };
+
 struct Order {
     OrderId id;
     Side side;
     Price price;
     Qty original;
-    // A new order is unfilled, so filled = original - remaining = 0
     Qty remaining = original;
     Tif tif;
     OrderType type = OrderType::Limit;
 };
+
+struct Fill {
+    OrderId maker;
+    OrderId taker;
+    Price price;
+    Qty qty;
+
+    bool operator==(const Fill&) const = default;
+};
+
+using Slot = std::uint32_t;
+constexpr Slot NIL = UINT32_MAX;
+
+struct OrderNode {
+    OrderId id;
+    Price price;
+    Qty remaining;
+    Slot prev = NIL, next = NIL;
+    Side side;
+    Tif tif;
+};
+
+// struct Level {
+//     Slot head = NIL, tail = NIL;
+//     Qty total = 0;
+//     std::uint32_t count = 0;
+// };
 
 struct Level {
     std::list<Order> orders;
@@ -39,10 +67,6 @@ struct OrderLocation {
     Level* level;
     std::list<Order>::iterator iter;
 };
-//
-// struct CancelOrder {
-//     OrderId id;
-// };
 
 std::string formatRawPrice(Price price);
 
