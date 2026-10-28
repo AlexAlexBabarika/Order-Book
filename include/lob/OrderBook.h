@@ -25,6 +25,8 @@ class OrderBook {
     Qty level_qty(Side side, Price price) const;
     std::vector<OrderId> orders_at(Side side, Price price) const;
 
+    // Calls on_fill(const Fill&) once per fill and lowers incoming.remaining. It doesn't rest
+    // what's left. on_fill must not change the book.
     template <typename OnFill>
     void match(Order& incoming, OnFill&& on_fill);
 
@@ -45,8 +47,42 @@ class OrderBook {
 };
 
 template <typename Book, typename OnFill>
-void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {}
+void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {
+    while (incoming.remaining > 0 && !book.empty()) {
+        const auto best = book.begin();
+        const Price price = best->first;
+        if (!crosses(incoming, price)) {
+            return;
+        }
+
+        Level& level = best->second;
+        while (incoming.remaining > 0 && !level.orders.empty()) {
+            Order& maker = level.orders.front();
+            const Qty qty = std::min(incoming.remaining, maker.remaining);
+            maker.remaining -= qty;
+            incoming.remaining -= qty;
+            level.total -= qty;
+            on_fill(Fill{.maker = maker.id, .taker = incoming.id, .price = price, .qty = qty});
+
+            if (maker.remaining == 0) {
+                // Erase by id first: pop_front() destroys maker
+                order_lookup.erase(maker.id);
+                level.orders.pop_front();
+            }
+        }
+
+        if (level.orders.empty()) {
+            book.erase(best);
+        }
+    }
+}
 
 template <typename OnFill>
-void OrderBook::match(Order& incoming, OnFill&& on_fill) {}
+void OrderBook::match(Order& incoming, OnFill&& on_fill) {
+    if (incoming.side == Side::Buy) {
+        match_against(ask_map, incoming, on_fill);
+    } else {
+        match_against(bid_map, incoming, on_fill);
+    }
+}
 }  // namespace lob
