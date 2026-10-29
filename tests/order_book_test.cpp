@@ -257,6 +257,10 @@ class Ladder : public ::testing::Test {
         return incoming.remaining;
     }
 
+    void submit(const Order& incoming) {
+        book.submit(incoming, [this](const Fill& fill) { fills.push_back(fill); });
+    }
+
     lob::OrderBook book;
     std::vector<Fill> fills;
 };
@@ -360,5 +364,113 @@ TEST_F(Ladder, MarketOrderStopsWhenSideIsEmpty) {
     EXPECT_EQ(fills.size(), 4u);
     EXPECT_EQ(book.best_ask(), INT64_MAX);
     EXPECT_EQ(book.size(), 2u);
+}
+
+TEST_F(Ladder, SubmitGtcRestsWhatsLeft) {
+    submit(buy(10, 100, 15));
+    EXPECT_EQ(fills, (std::vector<Fill>{{.maker = 1, .taker = 10, .price = 100, .qty = 5},
+                                        {.maker = 2, .taker = 10, .price = 100, .qty = 7}}));
+    EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{10}));
+    EXPECT_EQ(book.level_qty(Side::Buy, 100), 3);
+    EXPECT_EQ(book.best_bid(), 100);
+    EXPECT_EQ(book.best_ask(), 101);
+}
+
+TEST_F(Ladder, SubmitGtcThatDoesNotCrossRestsInFull) {
+    submit(buy(10, 99, 5));
+    EXPECT_TRUE(fills.empty());
+    EXPECT_EQ(book.orders_at(Side::Buy, 99), (std::vector<OrderId>{10}));
+    EXPECT_EQ(book.level_qty(Side::Buy, 99), 5);
+    EXPECT_EQ(book.best_bid(), 99);
+}
+
+TEST_F(Ladder, SubmitDayRestsUntilEndOfSession) {
+    submit(buy(10, 100, 15, Tif::Day));
+    EXPECT_EQ(book.level_qty(Side::Buy, 100), 3);
+    book.end_session();
+    EXPECT_FALSE(book.contains(10));
+    EXPECT_EQ(book.best_bid(), 98);
+}
+
+TEST_F(Ladder, RestedRemainderCanBeHitAndCancelled) {
+    submit(buy(10, 100, 15));
+    submit(sell(11, 100, 2));
+    EXPECT_EQ(fills.back(), (Fill{.maker = 10, .taker = 11, .price = 100, .qty = 2}));
+    EXPECT_EQ(book.level_qty(Side::Buy, 100), 1);
+    book.cancel(10);
+    EXPECT_EQ(book.level_qty(Side::Buy, 100), 0);
+    EXPECT_EQ(book.best_bid(), 98);
+}
+
+TEST_F(Ladder, SubmitIocDropsWhatsLeft) {
+    submit(buy(10, 100, 15, Tif::Ioc));
+    EXPECT_EQ(fills.size(), 2u);
+    EXPECT_FALSE(book.contains(10));
+    EXPECT_EQ(book.best_bid(), 98);
+    EXPECT_EQ(book.size(), 4u);
+}
+
+TEST_F(Ladder, SubmitIocThatDoesNotCrossDoesNothing) {
+    submit(buy(10, 99, 5, Tif::Ioc));
+    EXPECT_TRUE(fills.empty());
+    EXPECT_FALSE(book.contains(10));
+    EXPECT_EQ(book.size(), 6u);
+}
+
+TEST_F(Ladder, SubmitFokWithExactlyEnoughFills) {
+    submit(buy(10, 101, 16, Tif::Fok));
+    EXPECT_EQ(fills, (std::vector<Fill>{{.maker = 1, .taker = 10, .price = 100, .qty = 5},
+                                        {.maker = 2, .taker = 10, .price = 100, .qty = 7},
+                                        {.maker = 3, .taker = 10, .price = 101, .qty = 4}}));
+    EXPECT_FALSE(book.contains(10));
+    EXPECT_EQ(book.best_ask(), 103);
+}
+
+TEST_F(Ladder, SubmitFokOneShortDoesNothing) {
+    submit(buy(10, 101, 17, Tif::Fok));
+    EXPECT_TRUE(fills.empty());
+    EXPECT_FALSE(book.contains(10));
+    EXPECT_EQ(book.size(), 6u);
+    EXPECT_EQ(book.level_qty(Side::Sell, 100), 12);
+    EXPECT_EQ(book.level_qty(Side::Sell, 101), 4);
+}
+
+// The asks would cover it, so checking the wrong side lets this one trade
+TEST_F(Ladder, SubmitSellFokChecksBids) {
+    submit(sell(10, 98, 4, Tif::Fok));
+    EXPECT_TRUE(fills.empty());
+    EXPECT_EQ(book.level_qty(Side::Buy, 98), 3);
+}
+
+TEST_F(Ladder, SubmitMarketDoesNotRest) {
+    Order taker = buy(10, 0, 25);
+    taker.type = OrderType::Market;
+    submit(taker);
+    EXPECT_EQ(fills.size(), 4u);
+    EXPECT_FALSE(book.contains(10));
+    EXPECT_EQ(book.best_ask(), INT64_MAX);
+    EXPECT_EQ(book.best_bid(), 98);
+}
+
+TEST_F(Ladder, SubmitMarketFokCountsWholeSide) {
+    Order taker = buy(10, 0, 23, Tif::Fok);
+    taker.type = OrderType::Market;
+    submit(taker);
+    EXPECT_TRUE(fills.empty());
+    EXPECT_EQ(book.size(), 6u);
+}
+
+TEST_F(Ladder, SubmitDuplicateIdDoesNotTrade) {
+    submit(buy(1, 100, 5));
+    EXPECT_TRUE(fills.empty());
+    EXPECT_EQ(book.size(), 6u);
+    EXPECT_EQ(book.level_qty(Side::Sell, 100), 12);
+}
+
+TEST_F(Ladder, SubmitZeroQtyDoesNotTrade) {
+    submit(buy(10, 100, 0));
+    EXPECT_TRUE(fills.empty());
+    EXPECT_FALSE(book.contains(10));
+    EXPECT_EQ(book.size(), 6u);
 }
 }  // namespace
