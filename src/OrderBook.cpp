@@ -194,4 +194,44 @@ bool OrderBook::crosses(const Order& incoming, const Price price) {
     }
     return incoming.side == Side::Buy ? incoming.price >= price : incoming.price <= price;
 }
+
+template <typename Book>
+bool OrderBook::can_fill_from(const Book& book, const Order& incoming) {
+    Qty total = 0;
+    for (const auto& [price, level] : book) {
+        if (!crosses(incoming, price)) {
+            return false;
+        }
+        total += level.total;
+        if (total >= incoming.remaining) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool OrderBook::can_fill(const Order& incoming) const {
+    return incoming.side == Side::Buy ? can_fill_from(ask_map, incoming)
+                                      : can_fill_from(bid_map, incoming);
+}
+
+bool OrderBook::should_rest(const Order& order) {
+    if (order.remaining <= 0) {
+        return false;
+    }
+    if (order.type != OrderType::Limit) {
+        return false;
+    }
+    switch (order.tif) {
+        case Tif::Gtc:
+            return true;
+        case Tif::Day:
+            return true;
+        case Tif::Ioc:
+            return false;
+        case Tif::Fok:
+            return false;
+    }
+    return false;
+}
 }  // namespace lob

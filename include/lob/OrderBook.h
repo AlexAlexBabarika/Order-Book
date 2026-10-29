@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace lob {
@@ -25,13 +26,15 @@ class OrderBook {
     Qty level_qty(Side side, Price price) const;
     std::vector<OrderId> orders_at(Side side, Price price) const;
 
-    // Calls on_fill(const Fill&) once per fill and lowers incoming.remaining. It doesn't rest
-    // what's left. on_fill must not change the book.
     template <typename OnFill>
     void match(Order& incoming, OnFill&& on_fill);
 
+    template <typename OnFill>
+    void submit(Order order, OnFill&& on_fill);
+
    private:
     using LookupIter = std::unordered_map<OrderId, OrderLocation>::iterator;
+
     std::unordered_map<OrderId, OrderLocation> order_lookup;
     std::map<Price, Level, std::greater<Price>> bid_map;
     std::map<Price, Level, std::less<Price>> ask_map;
@@ -44,6 +47,13 @@ class OrderBook {
 
     template <typename Book, typename OnFill>
     void match_against(Book& book, Order& incoming, OnFill& on_fill);
+
+    bool can_fill(const Order& incoming) const;
+
+    template <typename Book>
+    static bool can_fill_from(const Book& book, const Order& incoming);
+
+    static bool should_rest(const Order& order);
 };
 
 template <typename Book, typename OnFill>
@@ -65,7 +75,6 @@ void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {
             on_fill(Fill{.maker = maker.id, .taker = incoming.id, .price = price, .qty = qty});
 
             if (maker.remaining == 0) {
-                // Erase by id first: pop_front() destroys maker
                 order_lookup.erase(maker.id);
                 level.orders.pop_front();
             }
@@ -83,6 +92,23 @@ void OrderBook::match(Order& incoming, OnFill&& on_fill) {
         match_against(ask_map, incoming, on_fill);
     } else {
         match_against(bid_map, incoming, on_fill);
+    }
+}
+
+template <typename OnFill>
+void OrderBook::submit(Order order, OnFill&& on_fill) {
+    if (!checkOrder(order)) {
+        return;
+    }
+
+    if (order.tif == Tif::Fok && !can_fill(order)) {
+        return;
+    }
+
+    match(order, std::forward<OnFill>(on_fill));
+
+    if (should_rest(order)) {
+        add(order);
     }
 }
 }  // namespace lob
