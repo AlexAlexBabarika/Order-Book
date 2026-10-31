@@ -1,8 +1,6 @@
 #include "lob/OrderBook.h"
 
 #include <cstddef>
-#include <cstdint>
-#include <iostream>
 #include <iterator>
 
 #include "lob/CoreTypes.h"
@@ -16,11 +14,11 @@ OrderLocation add_to_level(Book& book, const Order& order) {
     Level& level = book[order.price];
     level.orders.push_back(order);
     level.total += order.remaining;
-    return {.side = order.side,
-            .price = order.price,
-            .tif = order.tif,
+    return {.price = order.price,
             .level = &level,
-            .iter = std::prev(level.orders.end())};
+            .iter = std::prev(level.orders.end()),
+            .side = order.side,
+            .tif = order.tif};
 }
 
 template <typename Book>
@@ -41,31 +39,41 @@ const Level* find_level(const Book& book, const Price price) {
 
 }  // namespace
 
-void OrderBook::add(const Order& order) {
-    if (!checkOrder(order)) {
-        return;
+Result OrderBook::add(const Order& order) {
+    if (const Result result = validate(order); result != Result::Ok) {
+        return result;
     }
 
-    if (order.side == Side::Buy) {
-        order_lookup[order.id] = add_to_level(bid_map, order);
-    } else {
-        order_lookup[order.id] = add_to_level(ask_map, order);
+    const auto [iter, inserted] = order_lookup.try_emplace(order.id);
+    if (!inserted) {
+        return Result::DuplicateId;
     }
+
+    iter->second =
+        order.side == Side::Buy ? add_to_level(bid_map, order) : add_to_level(ask_map, order);
+    return Result::Ok;
 }
 
-void OrderBook::cancel(const OrderId id) { remove(id); }
+Result OrderBook::cancel(const OrderId id) {
+    const auto iter = order_lookup.find(id);
+    if (iter == order_lookup.end()) {
+        return Result::UnknownId;
+    }
 
-void OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQty) {
+    erase_order(iter);
+    return Result::Ok;
+}
+
+Result OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQty) {
     auto iter = order_lookup.find(id);
 
     if (iter == order_lookup.end()) {
-        std::cout << "Error: Order ID " << id << " doesn't exist.\n";
-        return;
+        return Result::UnknownId;
     }
 
     if (newQty <= 0) {
         erase_order(iter);
-        return;
+        return Result::Ok;
     }
 
     Order& resting = *iter->second.iter;
@@ -75,7 +83,7 @@ void OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQty)
         iter->second.level->total -= resting.remaining - newQty;
         resting.remaining = newQty;
         resting.original = filled + newQty;
-        return;
+        return Result::Ok;
     }
 
     Order updated = resting;
@@ -84,28 +92,31 @@ void OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQty)
     updated.remaining = newQty;
 
     erase_order(iter);
-    add(updated);
+    return add(updated);
 }
 
-Price OrderBook::best_bid() {
+std::optional<Price> OrderBook::best_bid() const {
     if (bid_map.empty()) {
-        std::cout << "Bids are empty. Returning INT64_MIN.\n";
-        return INT64_MIN;
+        return std::nullopt;
     }
-
     return bid_map.begin()->first;
 }
 
-Price OrderBook::best_ask() {
+std::optional<Price> OrderBook::best_ask() const {
     if (ask_map.empty()) {
-        std::cout << "Asks are empty. Returning INT64_MAX.\n";
-        return INT64_MAX;
+        return std::nullopt;
     }
-
     return ask_map.begin()->first;
 }
 
-Price OrderBook::spread() { return best_ask() - best_bid(); }
+std::optional<Price> OrderBook::spread() const {
+    const std::optional<Price> bid = best_bid();
+    const std::optional<Price> ask = best_ask();
+    if (!bid || !ask) {
+        return std::nullopt;
+    }
+    return *ask - *bid;
+}
 
 void OrderBook::end_session() {
     for (auto iter = order_lookup.begin(); iter != order_lookup.end();) {
@@ -140,17 +151,6 @@ std::vector<OrderId> OrderBook::orders_at(const Side side, const Price price) co
     return ids;
 }
 
-void OrderBook::remove(const OrderId id) {
-    auto iter = order_lookup.find(id);
-
-    if (iter == order_lookup.end()) {
-        std::cout << "Error: Order ID " << id << " doesn't exist.\n";
-        return;
-    }
-
-    erase_order(iter);
-}
-
 OrderBook::LookupIter OrderBook::erase_order(LookupIter iter) {
     const auto& loc = iter->second;
 
@@ -167,25 +167,11 @@ const Level* OrderBook::level_at(const Side side, const Price price) const {
     return side == Side::Buy ? find_level(bid_map, price) : find_level(ask_map, price);
 }
 
-bool OrderBook::checkOrder(const Order& order) {
-    if (order_lookup.find(order.id) != order_lookup.end()) {
-        std::cout << "Error: Order ID " << order.id << " already exists.\n";
-        return false;
+Result OrderBook::validate(const Order& order) {
+    if (order.remaining <= 0 || order.remaining > order.original) {
+        return Result::BadQty;
     }
-
-    if (order.remaining <= 0) {
-        std::cout << "Error: Order Id " << order.id
-                  << " Can't create an order with quantity smaller or equal to zero.\n";
-        return false;
-    }
-
-    if (order.remaining > order.original) {
-        std::cout << "Error: Order Id " << order.id
-                  << " Remaining quantity can't be larger than the original quantity.\n";
-        return false;
-    }
-
-    return true;
+    return Result::Ok;
 }
 
 bool OrderBook::crosses(const Order& incoming, const Price price) {

@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
-#include <cstdint>
+#include <optional>
 #include <ostream>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "lob/OrderBook.h"
@@ -11,24 +13,47 @@ void PrintTo(const Fill& fill, std::ostream* os) {
     *os << "{maker " << fill.maker << ", taker " << fill.taker << ", price " << fill.price
         << ", qty " << fill.qty << "}";
 }
+
+void PrintTo(const Result result, std::ostream* os) {
+    switch (result) {
+        case Result::Ok:
+            *os << "Ok";
+            return;
+        case Result::DuplicateId:
+            *os << "DuplicateId";
+            return;
+        case Result::UnknownId:
+            *os << "UnknownId";
+            return;
+        case Result::BadQty:
+            *os << "BadQty";
+            return;
+        case Result::BookFull:
+            *os << "BookFull";
+            return;
+    }
+}
 }  // namespace lob
 
 namespace {
 using namespace lob;
 
+static_assert(!std::is_copy_constructible_v<OrderBook>);
+static_assert(!std::is_copy_assignable_v<OrderBook>);
+
 Order buy(OrderId id, Price price, Qty qty, Tif tif = Tif::Gtc) {
-    return {.id = id, .side = Side::Buy, .price = price, .original = qty, .tif = tif};
+    return {.id = id, .price = price, .original = qty, .side = Side::Buy, .tif = tif};
 }
 
 Order sell(OrderId id, Price price, Qty qty, Tif tif = Tif::Gtc) {
-    return {.id = id, .side = Side::Sell, .price = price, .original = qty, .tif = tif};
+    return {.id = id, .price = price, .original = qty, .side = Side::Sell, .tif = tif};
 }
 
 TEST(OrderBook, EmptyBookHasNoOrders) {
     lob::OrderBook book;
     EXPECT_EQ(book.size(), 0u);
-    EXPECT_EQ(book.best_ask(), INT64_MAX);
-    EXPECT_EQ(book.best_bid(), INT64_MIN);
+    EXPECT_EQ(book.best_ask(), std::nullopt);
+    EXPECT_EQ(book.best_bid(), std::nullopt);
 }
 
 TEST(OrderBook, BestPrices) {
@@ -42,12 +67,24 @@ TEST(OrderBook, BestPrices) {
     book.add(sell(5, 104, 1));
     EXPECT_EQ(book.best_ask(), 103);
     EXPECT_EQ(book.best_bid(), 101);
+    EXPECT_EQ(book.spread(), 2);
+}
+
+// With bids empty, best_ask() - INT64_MIN used to overflow
+TEST(OrderBook, SpreadNeedsBothSides) {
+    lob::OrderBook book;
+    EXPECT_EQ(book.spread(), std::nullopt);
+    book.add(sell(1, 103, 1));
+    EXPECT_EQ(book.spread(), std::nullopt);
+    book.cancel(1);
+    book.add(buy(2, 101, 1));
+    EXPECT_EQ(book.spread(), std::nullopt);
 }
 
 TEST(OrderBook, SamePriceQueuesInArrivalOrder) {
     lob::OrderBook book;
-    book.add(buy(1, 100, 5));
-    book.add(buy(2, 100, 7));
+    EXPECT_EQ(book.add(buy(1, 100, 5)), Result::Ok);
+    EXPECT_EQ(book.add(buy(2, 100, 7)), Result::Ok);
     EXPECT_EQ(book.size(), 2u);
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 12);
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{1, 2}));
@@ -66,7 +103,7 @@ class ThreeBidsAt100 : public ::testing::Test {
 };
 
 TEST_F(ThreeBidsAt100, CancelHeadKeepsRestInOrder) {
-    book.cancel(1);
+    EXPECT_EQ(book.cancel(1), Result::Ok);
     EXPECT_FALSE(book.contains(1));
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{2, 3}));
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 8);
@@ -105,28 +142,28 @@ TEST(OrderBook, CancellingLastOrderAtBestPriceRemovesLevel) {
 TEST(OrderBook, DuplicateIdIsRejected) {
     lob::OrderBook book;
     book.add(buy(1, 100, 5));
-    book.add(sell(1, 105, 3));
+    EXPECT_EQ(book.add(sell(1, 105, 3)), Result::DuplicateId);
     EXPECT_EQ(book.size(), 1u);
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 5);
     EXPECT_EQ(book.level_qty(Side::Sell, 105), 0);
-    EXPECT_EQ(book.best_ask(), INT64_MAX);
+    EXPECT_EQ(book.best_ask(), std::nullopt);
 }
 
 TEST(OrderBook, NonPositiveQtyIsRejected) {
     lob::OrderBook book;
-    book.add(buy(1, 100, 0));
-    book.add(buy(2, 100, -5));
+    EXPECT_EQ(book.add(buy(1, 100, 0)), Result::BadQty);
+    EXPECT_EQ(book.add(buy(2, 100, -5)), Result::BadQty);
     EXPECT_EQ(book.size(), 0u);
     EXPECT_FALSE(book.contains(1));
     EXPECT_FALSE(book.contains(2));
-    EXPECT_EQ(book.best_bid(), INT64_MIN);
+    EXPECT_EQ(book.best_bid(), std::nullopt);
 }
 
 TEST(OrderBook, RemainingAboveOriginalIsRejected) {
     lob::OrderBook book;
     Order order = buy(1, 100, 5);
     order.remaining = 6;
-    book.add(order);
+    EXPECT_EQ(book.add(order), Result::BadQty);
     EXPECT_FALSE(book.contains(1));
     EXPECT_EQ(book.size(), 0u);
 }
@@ -134,8 +171,8 @@ TEST(OrderBook, RemainingAboveOriginalIsRejected) {
 TEST(OrderBook, UnknownIdCancelAndModifyChangeNothing) {
     lob::OrderBook book;
     book.add(buy(1, 100, 5));
-    book.cancel(99);
-    book.modify(99, 101, 10);
+    EXPECT_EQ(book.cancel(99), Result::UnknownId);
+    EXPECT_EQ(book.modify(99, 101, 10), Result::UnknownId);
     EXPECT_EQ(book.size(), 1u);
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{1}));
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 5);
@@ -143,7 +180,7 @@ TEST(OrderBook, UnknownIdCancelAndModifyChangeNothing) {
 }
 
 TEST_F(ThreeBidsAt100, LowerQtyAtSamePriceKeepsQueuePosition) {
-    book.modify(1, 100, 2);
+    EXPECT_EQ(book.modify(1, 100, 2), Result::Ok);
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{1, 2, 3}));
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 10);
 }
@@ -161,7 +198,7 @@ TEST_F(ThreeBidsAt100, HigherQtyMovesOrderToBackOfQueue) {
 }
 
 TEST_F(ThreeBidsAt100, NewPriceMovesOrderToNewLevel) {
-    book.modify(2, 101, 7);
+    EXPECT_EQ(book.modify(2, 101, 7), Result::Ok);
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{1, 3}));
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 6);
     EXPECT_EQ(book.orders_at(Side::Buy, 101), (std::vector<OrderId>{2}));
@@ -179,8 +216,8 @@ TEST(OrderBook, NewPriceRemovesEmptiedLevel) {
 }
 
 TEST_F(ThreeBidsAt100, NonPositiveQtyModifyCancels) {
-    book.modify(2, 100, 0);
-    book.modify(3, 100, -1);
+    EXPECT_EQ(book.modify(2, 100, 0), Result::Ok);
+    EXPECT_EQ(book.modify(3, 100, -1), Result::Ok);
     EXPECT_FALSE(book.contains(2));
     EXPECT_FALSE(book.contains(3));
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{1}));
@@ -235,8 +272,21 @@ TEST(OrderBook, ManyOrdersAddedAndCancelledLeaveBookEmpty) {
         }
     }
     EXPECT_EQ(book.size(), 0u);
-    EXPECT_EQ(book.best_bid(), INT64_MIN);
-    EXPECT_EQ(book.best_ask(), INT64_MAX);
+    EXPECT_EQ(book.best_bid(), std::nullopt);
+    EXPECT_EQ(book.best_ask(), std::nullopt);
+}
+
+TEST(OrderBook, MovedBookKeepsWorking) {
+    lob::OrderBook book;
+    book.add(buy(1, 100, 5));
+    book.add(buy(2, 100, 7));
+    lob::OrderBook moved = std::move(book);
+
+    EXPECT_EQ(moved.cancel(1), Result::Ok);
+    EXPECT_EQ(moved.orders_at(Side::Buy, 100), (std::vector<OrderId>{2}));
+    EXPECT_EQ(moved.level_qty(Side::Buy, 100), 7);
+    EXPECT_EQ(moved.modify(2, 99, 7), Result::Ok);
+    EXPECT_EQ(moved.best_bid(), 99);
 }
 
 // Asks: 1 (5) and 2 (7) at 100, 3 (4) at 101, 4 (6) at 103
@@ -257,8 +307,8 @@ class Ladder : public ::testing::Test {
         return incoming.remaining;
     }
 
-    void submit(const Order& incoming) {
-        book.submit(incoming, [this](const Fill& fill) { fills.push_back(fill); });
+    Result submit(const Order& incoming) {
+        return book.submit(incoming, [this](const Fill& fill) { fills.push_back(fill); });
     }
 
     lob::OrderBook book;
@@ -362,12 +412,12 @@ TEST_F(Ladder, MarketOrderStopsWhenSideIsEmpty) {
     taker.type = OrderType::Market;
     EXPECT_EQ(take(taker), 3);
     EXPECT_EQ(fills.size(), 4u);
-    EXPECT_EQ(book.best_ask(), INT64_MAX);
+    EXPECT_EQ(book.best_ask(), std::nullopt);
     EXPECT_EQ(book.size(), 2u);
 }
 
 TEST_F(Ladder, SubmitGtcRestsWhatsLeft) {
-    submit(buy(10, 100, 15));
+    EXPECT_EQ(submit(buy(10, 100, 15)), Result::Ok);
     EXPECT_EQ(fills, (std::vector<Fill>{{.maker = 1, .taker = 10, .price = 100, .qty = 5},
                                         {.maker = 2, .taker = 10, .price = 100, .qty = 7}}));
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{10}));
@@ -427,7 +477,7 @@ TEST_F(Ladder, SubmitFokWithExactlyEnoughFills) {
 }
 
 TEST_F(Ladder, SubmitFokOneShortDoesNothing) {
-    submit(buy(10, 101, 17, Tif::Fok));
+    EXPECT_EQ(submit(buy(10, 101, 17, Tif::Fok)), Result::Ok);
     EXPECT_TRUE(fills.empty());
     EXPECT_FALSE(book.contains(10));
     EXPECT_EQ(book.size(), 6u);
@@ -435,7 +485,6 @@ TEST_F(Ladder, SubmitFokOneShortDoesNothing) {
     EXPECT_EQ(book.level_qty(Side::Sell, 101), 4);
 }
 
-// The asks would cover it, so checking the wrong side lets this one trade
 TEST_F(Ladder, SubmitSellFokChecksBids) {
     submit(sell(10, 98, 4, Tif::Fok));
     EXPECT_TRUE(fills.empty());
@@ -448,7 +497,7 @@ TEST_F(Ladder, SubmitMarketDoesNotRest) {
     submit(taker);
     EXPECT_EQ(fills.size(), 4u);
     EXPECT_FALSE(book.contains(10));
-    EXPECT_EQ(book.best_ask(), INT64_MAX);
+    EXPECT_EQ(book.best_ask(), std::nullopt);
     EXPECT_EQ(book.best_bid(), 98);
 }
 
@@ -461,14 +510,14 @@ TEST_F(Ladder, SubmitMarketFokCountsWholeSide) {
 }
 
 TEST_F(Ladder, SubmitDuplicateIdDoesNotTrade) {
-    submit(buy(1, 100, 5));
+    EXPECT_EQ(submit(buy(1, 100, 5)), Result::DuplicateId);
     EXPECT_TRUE(fills.empty());
     EXPECT_EQ(book.size(), 6u);
     EXPECT_EQ(book.level_qty(Side::Sell, 100), 12);
 }
 
 TEST_F(Ladder, SubmitZeroQtyDoesNotTrade) {
-    submit(buy(10, 100, 0));
+    EXPECT_EQ(submit(buy(10, 100, 0)), Result::BadQty);
     EXPECT_TRUE(fills.empty());
     EXPECT_FALSE(book.contains(10));
     EXPECT_EQ(book.size(), 6u);

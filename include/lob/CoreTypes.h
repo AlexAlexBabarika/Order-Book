@@ -12,7 +12,7 @@ typedef std::int64_t Qty;
 const Price MAX_TICK_LEN = 2;
 const Price TICK_FACTOR = pow(10, MAX_TICK_LEN);
 
-enum class Side { Buy, Sell };
+enum class Side : std::uint8_t { Buy, Sell };
 enum class Tif : std::uint8_t { Gtc, Ioc, Fok, Day };
 enum class OrderType : std::uint8_t { Market, Limit };
 
@@ -20,13 +20,14 @@ enum class Result : std::uint8_t { Ok, DuplicateId, UnknownId, BadQty, BookFull 
 
 struct Order {
     OrderId id;
-    Side side;
     Price price;
     Qty original;
     Qty remaining = original;
+    Side side;
     Tif tif;
     OrderType type = OrderType::Limit;
 };
+static_assert(sizeof(Order) == 40);
 
 struct Fill {
     OrderId maker;
@@ -61,12 +62,13 @@ struct Level {
 };
 
 struct OrderLocation {
-    Side side;
     Price price;
-    Tif tif;
     Level* level;
     std::list<Order>::iterator iter;
+    Side side;
+    Tif tif;
 };
+static_assert(sizeof(OrderLocation) == 32);
 
 std::string formatRawPrice(Price price);
 

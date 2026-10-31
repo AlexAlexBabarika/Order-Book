@@ -7,7 +7,6 @@ namespace lob::bench {
 
 namespace {
 
-// Resting buys sit below MID and resting sells above it, so resting adds and modifies never cross
 constexpr Price MID = 10'000;
 constexpr Price MAX_OFFSET = 100;
 
@@ -16,7 +15,6 @@ struct LiveOrder {
     Side side;
 };
 
-// Builds each message against a scratch book, so it always knows which orders are live
 class Generator {
    public:
     explicit Generator(std::uint64_t seed) : rng(seed) {}
@@ -29,8 +27,7 @@ class Generator {
         if (roll < 55) {
             return scratch.size() < TARGET_DEPTH ? rest() : cancel();
         }
-        // Every resting order is as likely to be cancelled or modified as any other, so these scale
-        // with the depth. At TARGET_DEPTH the mix is 45% rest, 40% cancel, 5% modify, 10% take.
+
         if (depth(rng) >= scratch.size()) {
             return rest();
         }
@@ -65,22 +62,21 @@ class Generator {
     Message rest() {
         const Side s = side();
         const Order order{.id = next_id++,
-                          .side = s,
                           .price = passive_price(s),
                           .original = qty(rng),
+                          .side = s,
                           .tif = Tif::Gtc};
         live.push_back({order.id, s});
         return submit(order);
     }
 
-    // An IOC a few ticks through the touch, which may sweep more than one level
     Message take() {
         const Side s = side();
         const Price ticks = cross(rng);
         const Order order{.id = next_id++,
-                          .side = s,
                           .price = s == Side::Buy ? MID + ticks : MID - ticks,
                           .original = qty(rng),
+                          .side = s,
                           .tif = Tif::Ioc};
         return submit(order);
     }
@@ -104,8 +100,6 @@ class Generator {
         return msg;
     }
 
-    // Orders a taker filled are still in `live`. They're dropped here when a pick lands on one.
-    // Needs a non-empty book: every resting order is in `live`, so the loop then ends.
     std::size_t pick_live() {
         for (;;) {
             const std::size_t i =

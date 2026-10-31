@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <functional>
 #include <map>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -13,12 +14,18 @@ namespace lob {
 
 class OrderBook {
    public:
-    void add(const Order& order);
-    void cancel(const OrderId id);
-    void modify(const OrderId id, const Price newPrice, const Qty newQty);
-    Price best_bid();
-    Price best_ask();
-    Price spread();
+    OrderBook() = default;
+    OrderBook(const OrderBook&) = delete;
+    OrderBook& operator=(const OrderBook&) = delete;
+    OrderBook(OrderBook&&) = default;
+    OrderBook& operator=(OrderBook&&) = default;
+
+    Result add(const Order& order);
+    Result cancel(const OrderId id);
+    Result modify(const OrderId id, const Price newPrice, const Qty newQty);
+    std::optional<Price> best_bid() const;
+    std::optional<Price> best_ask() const;
+    std::optional<Price> spread() const;
     void end_session();
 
     std::size_t size() const;
@@ -30,7 +37,7 @@ class OrderBook {
     void match(Order& incoming, OnFill&& on_fill);
 
     template <typename OnFill>
-    void submit(Order order, OnFill&& on_fill);
+    Result submit(Order order, OnFill&& on_fill);
 
    private:
     using LookupIter = std::unordered_map<OrderId, OrderLocation>::iterator;
@@ -39,10 +46,9 @@ class OrderBook {
     std::map<Price, Level, std::greater<Price>> bid_map;
     std::map<Price, Level, std::less<Price>> ask_map;
 
-    void remove(const OrderId id);
     LookupIter erase_order(LookupIter iter);
     const Level* level_at(const Side side, const Price price) const;
-    bool checkOrder(const Order& order);
+    static Result validate(const Order& order);
     static bool crosses(const Order& incoming, const Price price);
 
     template <typename Book, typename OnFill>
@@ -96,13 +102,17 @@ void OrderBook::match(Order& incoming, OnFill&& on_fill) {
 }
 
 template <typename OnFill>
-void OrderBook::submit(Order order, OnFill&& on_fill) {
-    if (!checkOrder(order)) {
-        return;
+Result OrderBook::submit(Order order, OnFill&& on_fill) {
+    if (const Result result = validate(order); result != Result::Ok) {
+        return result;
+    }
+
+    if (contains(order.id)) {
+        return Result::DuplicateId;
     }
 
     if (order.tif == Tif::Fok && !can_fill(order)) {
-        return;
+        return Result::Ok;
     }
 
     match(order, std::forward<OnFill>(on_fill));
@@ -110,5 +120,6 @@ void OrderBook::submit(Order order, OnFill&& on_fill) {
     if (should_rest(order)) {
         add(order);
     }
+    return Result::Ok;
 }
 }  // namespace lob
