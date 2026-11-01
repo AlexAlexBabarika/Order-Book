@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 #include <list>
+#include <memory_resource>
 #include <string>
 
 namespace lob {
@@ -57,14 +58,18 @@ struct OrderNode {
 // };
 
 struct Level {
-    std::list<Order> orders;
+    using allocator_type = std::pmr::polymorphic_allocator<>;
+
+    explicit Level(const allocator_type& alloc) : orders(alloc) {}
+
+    std::pmr::list<Order> orders;
     Qty total = 0;
 };
 
 struct OrderLocation {
     Price price;
     Level* level;
-    std::list<Order>::iterator iter;
+    std::pmr::list<Order>::iterator iter;
     Side side;
     Tif tif;
 };

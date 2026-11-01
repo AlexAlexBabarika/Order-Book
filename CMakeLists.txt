@@ -45,8 +45,6 @@ gtest_discover_tests(lob_tests)
 add_executable(lob_no_alloc_test tests/no_alloc_test.cpp)
 target_link_libraries(lob_no_alloc_test PRIVATE lob_workload GTest::gtest_main)
 add_test(NAME NoAllocationAfterWarmUp COMMAND lob_no_alloc_test)
-# The hot path still allocates. Remove WILL_FAIL once it stops (readme, "Order of work", step 4)
-set_tests_properties(NoAllocationAfterWarmUp PROPERTIES WILL_FAIL TRUE)
 
 # Only the release preset gives meaningful numbers
 add_executable(lob_bench bench/order_book_bench.cpp)

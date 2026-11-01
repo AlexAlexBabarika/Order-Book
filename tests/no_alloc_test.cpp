@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdlib>
+#include <memory_resource>
 #include <new>
 #include <vector>
 
@@ -35,6 +36,8 @@ TEST(HotPath, NoAllocationAfterWarmUp) {
     std::size_t fills = 0;
     // Only counts: storing the fills would allocate
     auto on_fill = [&fills](const Fill&) { ++fills; };
+    // A pmr container that misses the pool falls back to this, and throws
+    std::pmr::set_default_resource(std::pmr::null_memory_resource());
 
     for (std::size_t i = 0; i < WARM_UP; ++i) {
         bench::apply(book, messages[i], on_fill);

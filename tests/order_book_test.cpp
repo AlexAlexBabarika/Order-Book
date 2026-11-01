@@ -40,6 +40,8 @@ using namespace lob;
 
 static_assert(!std::is_copy_constructible_v<OrderBook>);
 static_assert(!std::is_copy_assignable_v<OrderBook>);
+static_assert(!std::is_move_constructible_v<OrderBook>);
+static_assert(!std::is_move_assignable_v<OrderBook>);
 
 Order buy(OrderId id, Price price, Qty qty, Tif tif = Tif::Gtc) {
     return {.id = id, .price = price, .original = qty, .side = Side::Buy, .tif = tif};
@@ -274,19 +276,6 @@ TEST(OrderBook, ManyOrdersAddedAndCancelledLeaveBookEmpty) {
     EXPECT_EQ(book.size(), 0u);
     EXPECT_EQ(book.best_bid(), std::nullopt);
     EXPECT_EQ(book.best_ask(), std::nullopt);
-}
-
-TEST(OrderBook, MovedBookKeepsWorking) {
-    lob::OrderBook book;
-    book.add(buy(1, 100, 5));
-    book.add(buy(2, 100, 7));
-    lob::OrderBook moved = std::move(book);
-
-    EXPECT_EQ(moved.cancel(1), Result::Ok);
-    EXPECT_EQ(moved.orders_at(Side::Buy, 100), (std::vector<OrderId>{2}));
-    EXPECT_EQ(moved.level_qty(Side::Buy, 100), 7);
-    EXPECT_EQ(moved.modify(2, 99, 7), Result::Ok);
-    EXPECT_EQ(moved.best_bid(), 99);
 }
 
 // Asks: 1 (5) and 2 (7) at 100, 3 (4) at 101, 4 (6) at 103

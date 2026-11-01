@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <functional>
 #include <map>
+#include <memory_resource>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -14,11 +15,14 @@ namespace lob {
 
 class OrderBook {
    public:
-    OrderBook() = default;
+    static constexpr std::size_t DEFAULT_ARENA_BYTES = std::size_t{16} << 20;
+    static constexpr std::size_t EXPECTED_ORDERS = 16'384;
+
+    explicit OrderBook(std::size_t arena_bytes = DEFAULT_ARENA_BYTES);
     OrderBook(const OrderBook&) = delete;
     OrderBook& operator=(const OrderBook&) = delete;
-    OrderBook(OrderBook&&) = default;
-    OrderBook& operator=(OrderBook&&) = default;
+    OrderBook(OrderBook&&) = delete;
+    OrderBook& operator=(OrderBook&&) = delete;
 
     Result add(const Order& order);
     Result cancel(const OrderId id);
@@ -40,11 +44,14 @@ class OrderBook {
     Result submit(Order order, OnFill&& on_fill);
 
    private:
-    using LookupIter = std::unordered_map<OrderId, OrderLocation>::iterator;
+    using LookupIter = std::pmr::unordered_map<OrderId, OrderLocation>::iterator;
 
-    std::unordered_map<OrderId, OrderLocation> order_lookup;
-    std::map<Price, Level, std::greater<Price>> bid_map;
-    std::map<Price, Level, std::less<Price>> ask_map;
+    std::vector<std::byte> arena_;
+    std::pmr::monotonic_buffer_resource upstream_;
+    std::pmr::unsynchronized_pool_resource pool_;
+    std::pmr::unordered_map<OrderId, OrderLocation> order_lookup{&pool_};
+    std::pmr::map<Price, Level, std::greater<Price>> bid_map{&pool_};
+    std::pmr::map<Price, Level, std::less<Price>> ask_map{&pool_};
 
     LookupIter erase_order(LookupIter iter);
     const Level* level_at(const Side side, const Price price) const;

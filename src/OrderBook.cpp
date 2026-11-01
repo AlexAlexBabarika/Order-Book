@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <iterator>
+#include <memory_resource>
 
 #include "lob/CoreTypes.h"
 
@@ -38,6 +39,13 @@ const Level* find_level(const Book& book, const Price price) {
 }
 
 }  // namespace
+
+OrderBook::OrderBook(const std::size_t arena_bytes)
+    : arena_(arena_bytes),
+      upstream_(arena_.data(), arena_.size(), std::pmr::null_memory_resource()),
+      pool_(&upstream_) {
+    order_lookup.reserve(EXPECTED_ORDERS);
+}
 
 Result OrderBook::add(const Order& order) {
     if (const Result result = validate(order); result != Result::Ok) {
