@@ -121,6 +121,10 @@ TEST_F(ThreeBidsAt100, CancelTailKeepsRestInOrder) {
     EXPECT_FALSE(book.contains(3));
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{1, 2}));
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 12);
+
+    // A stale tail only shows up on the next append
+    book.add(buy(4, 100, 2));
+    EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{1, 2, 4}));
 }
 
 TEST(OrderBook, CancellingLastOrderAtBestPriceRemovesLevel) {
@@ -287,6 +291,48 @@ TEST(OrderBook, MovedBookKeepsWorking) {
     EXPECT_EQ(moved.level_qty(Side::Buy, 100), 7);
     EXPECT_EQ(moved.modify(2, 99, 7), Result::Ok);
     EXPECT_EQ(moved.best_bid(), 99);
+}
+
+TEST(OrderBook, FullBookRejectsUntilASlotFrees) {
+    lob::OrderBook book(2);
+    EXPECT_EQ(book.add(buy(1, 100, 5)), Result::Ok);
+    EXPECT_EQ(book.add(buy(2, 100, 7)), Result::Ok);
+    EXPECT_EQ(book.add(sell(3, 105, 1)), Result::BookFull);
+    EXPECT_EQ(book.size(), 2u);
+    EXPECT_FALSE(book.contains(3));
+    EXPECT_EQ(book.best_ask(), std::nullopt);
+
+    book.cancel(1);
+    EXPECT_EQ(book.add(sell(3, 105, 1)), Result::Ok);
+    EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{2}));
+    EXPECT_EQ(book.best_ask(), 105);
+}
+
+TEST(OrderBook, ModifyOnFullBookKeepsItsSlot) {
+    lob::OrderBook book(1);
+    book.add(buy(1, 100, 5));
+    EXPECT_EQ(book.modify(1, 101, 5), Result::Ok);
+    EXPECT_EQ(book.modify(1, 101, 9), Result::Ok);
+    EXPECT_EQ(book.orders_at(Side::Buy, 101), (std::vector<OrderId>{1}));
+    EXPECT_EQ(book.level_qty(Side::Buy, 101), 9);
+    EXPECT_EQ(book.level_qty(Side::Buy, 100), 0);
+}
+
+TEST(OrderBook, SubmitReportsFullBook) {
+    lob::OrderBook book(1);
+    book.add(sell(1, 101, 5));
+    EXPECT_EQ(book.submit(buy(2, 100, 3), [](const Fill&) {}), Result::BookFull);
+    EXPECT_FALSE(book.contains(2));
+    EXPECT_EQ(book.best_bid(), std::nullopt);
+}
+
+TEST(OrderBook, FilledMakerFreesSlotForRemainder) {
+    lob::OrderBook book(1);
+    book.add(sell(1, 100, 5));
+    EXPECT_EQ(book.submit(buy(2, 100, 8), [](const Fill&) {}), Result::Ok);
+    EXPECT_FALSE(book.contains(1));
+    EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{2}));
+    EXPECT_EQ(book.level_qty(Side::Buy, 100), 3);
 }
 
 // Asks: 1 (5) and 2 (7) at 100, 3 (4) at 101, 4 (6) at 103

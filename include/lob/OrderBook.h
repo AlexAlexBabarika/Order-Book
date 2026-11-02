@@ -1,8 +1,10 @@
 #pragma once
 #include <lob/CoreTypes.h>
+#include <lob/OrderPool.h>
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <optional>
@@ -14,7 +16,9 @@ namespace lob {
 
 class OrderBook {
    public:
-    OrderBook() = default;
+    static constexpr std::uint32_t DEFAULT_MAX_ORDERS = 1 << 16;
+
+    explicit OrderBook(std::uint32_t max_orders = DEFAULT_MAX_ORDERS);
     OrderBook(const OrderBook&) = delete;
     OrderBook& operator=(const OrderBook&) = delete;
     OrderBook(OrderBook&&) = default;
@@ -40,13 +44,18 @@ class OrderBook {
     Result submit(Order order, OnFill&& on_fill);
 
    private:
-    using LookupIter = std::unordered_map<OrderId, OrderLocation>::iterator;
+    using LookupIter = std::unordered_map<OrderId, Slot>::iterator;
 
-    std::unordered_map<OrderId, OrderLocation> order_lookup;
+    OrderPool order_pool;
+    std::unordered_map<OrderId, Slot> order_lookup;
     std::map<Price, Level, std::greater<Price>> bid_map;
     std::map<Price, Level, std::less<Price>> ask_map;
 
     LookupIter erase_order(LookupIter iter);
+    void link_back(Level& level, Slot slot);
+    void unlink(Slot slot);
+    Level& level_for(Side side, Price price);
+    void erase_if_empty(const Level& level, Side side);
     const Level* level_at(const Side side, const Price price) const;
     static Result validate(const Order& order);
     static bool crosses(const Order& incoming, const Price price);
@@ -72,8 +81,9 @@ void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {
         }
 
         Level& level = best->second;
-        while (incoming.remaining > 0 && !level.orders.empty()) {
-            Order& maker = level.orders.front();
+        while (incoming.remaining > 0 && level.head != NIL) {
+            const Slot slot = level.head;
+            OrderNode& maker = order_pool[slot];
             const Qty qty = std::min(incoming.remaining, maker.remaining);
             maker.remaining -= qty;
             incoming.remaining -= qty;
@@ -82,11 +92,12 @@ void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {
 
             if (maker.remaining == 0) {
                 order_lookup.erase(maker.id);
-                level.orders.pop_front();
+                unlink(slot);
+                order_pool.release(slot);
             }
         }
 
-        if (level.orders.empty()) {
+        if (level.head == NIL) {
             book.erase(best);
         }
     }
@@ -118,7 +129,7 @@ Result OrderBook::submit(Order order, OnFill&& on_fill) {
     match(order, std::forward<OnFill>(on_fill));
 
     if (should_rest(order)) {
-        add(order);
+        return add(order);
     }
     return Result::Ok;
 }

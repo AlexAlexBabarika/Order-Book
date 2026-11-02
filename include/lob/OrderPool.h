@@ -1,9 +1,11 @@
 #pragma once
+#include <lob/CoreTypes.h>
 
-#include "lob/CoreTypes.h"
+#include <cstdint>
+#include <utility>
+#include <vector>
 
-using Slot = std::uint32_t;
-constexpr Slot NIL = UINT32_MAX;
+namespace lob {
 
 class OrderPool {
    public:
@@ -13,6 +15,16 @@ class OrderPool {
         }
         free_head_ = capacity == 0 ? NIL : 0;
     }
+
+    OrderPool(OrderPool&& other) noexcept
+        : nodes_(std::move(other.nodes_)), free_head_(std::exchange(other.free_head_, NIL)) {}
+    OrderPool& operator=(OrderPool&& other) noexcept {
+        nodes_ = std::move(other.nodes_);
+        free_head_ = std::exchange(other.free_head_, NIL);
+        return *this;
+    }
+
+    bool full() const { return free_head_ == NIL; }
 
     Slot acquire() {
         const Slot s = free_head_;
@@ -27,9 +39,12 @@ class OrderPool {
         free_head_ = s;
     }
 
-    lob::OrderNode& operator[](Slot s) { return nodes_[s]; }
+    OrderNode& operator[](Slot s) { return nodes_[s]; }
+    const OrderNode& operator[](Slot s) const { return nodes_[s]; }
 
    private:
-    std::vector<lob::OrderNode> nodes_;
+    std::vector<OrderNode> nodes_;
     Slot free_head_ = NIL;
 };
+
+}  // namespace lob

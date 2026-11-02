@@ -1,7 +1,6 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
-#include <list>
 #include <string>
 
 namespace lob {
@@ -41,34 +40,27 @@ struct Fill {
 using Slot = std::uint32_t;
 constexpr Slot NIL = UINT32_MAX;
 
+struct Level {
+    Price price;
+    Qty total = 0;
+    Slot head = NIL;
+    Slot tail = NIL;
+    std::uint32_t count = 0;
+};
+static_assert(sizeof(Level) == 32);
+
+// Step 7 swaps Level* for a 4-byte level slot, which brings this to 40 bytes
 struct OrderNode {
     OrderId id;
-    Price price;
     Qty remaining;
-    Slot prev = NIL, next = NIL;
+    Qty original;
+    Level* level = nullptr;
+    Slot prev = NIL;
+    Slot next = NIL;  // also links the free list while the slot is free
     Side side;
     Tif tif;
 };
-
-// struct Level {
-//     Slot head = NIL, tail = NIL;
-//     Qty total = 0;
-//     std::uint32_t count = 0;
-// };
-
-struct Level {
-    std::list<Order> orders;
-    Qty total = 0;
-};
-
-struct OrderLocation {
-    Price price;
-    Level* level;
-    std::list<Order>::iterator iter;
-    Side side;
-    Tif tif;
-};
-static_assert(sizeof(OrderLocation) == 32);
+static_assert(sizeof(OrderNode) == 48);
 
 std::string formatRawPrice(Price price);
 
