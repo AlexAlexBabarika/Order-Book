@@ -22,7 +22,10 @@ const Level* find_level(const Book& book, const Price price) {
 
 }  // namespace
 
-OrderBook::OrderBook(const std::uint32_t max_orders) : order_pool(max_orders) {}
+// add() stops at a full pool, so the index never grows past this
+OrderBook::OrderBook(const std::uint32_t max_orders) : order_pool(max_orders) {
+    order_lookup.reserve(max_orders);
+}
 
 Result OrderBook::add(const Order& order) {
     if (const Result result = validate(order); result != Result::Ok) {

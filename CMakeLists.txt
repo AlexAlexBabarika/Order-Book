@@ -22,11 +22,20 @@ FetchContent_Declare(
   GIT_SHALLOW TRUE
   GIT_TAG        v1.9.5
 )
-FetchContent_MakeAvailable(googletest benchmark)
+FetchContent_Declare(
+  unordered_dense
+  GIT_REPOSITORY https://github.com/martinus/unordered_dense.git
+  GIT_SHALLOW TRUE
+  GIT_TAG        v5.3.2
+  SYSTEM
+)
+FetchContent_MakeAvailable(googletest benchmark unordered_dense)
 
 add_library(lob src/OrderBook.cpp src/lob_version.cpp src/CoreTypes.cpp)
 target_compile_features(lob PUBLIC cxx_std_20)
 target_include_directories(lob PUBLIC include)
+# PUBLIC because OrderBook.h includes it
+target_link_libraries(lob PUBLIC unordered_dense::unordered_dense)
 
 add_library(lob_workload STATIC bench/Workload.cpp)
 target_include_directories(lob_workload PUBLIC bench)

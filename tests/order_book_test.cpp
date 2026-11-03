@@ -245,6 +245,19 @@ TEST(OrderBook, EndSessionRemovesOnlyDayOrders) {
     EXPECT_EQ(book.best_ask(), 106);
 }
 
+// Erasing from the index moves its last entry into the gap, and end_session must still check it
+TEST(OrderBook, EndSessionRemovesDayOrderAddedLast) {
+    lob::OrderBook book;
+    book.add(buy(1, 100, 5, Tif::Day));
+    book.add(buy(2, 100, 7));
+    book.add(sell(3, 105, 2, Tif::Day));
+
+    book.end_session();
+    EXPECT_EQ(book.size(), 1u);
+    EXPECT_TRUE(book.contains(2));
+    EXPECT_EQ(book.best_ask(), std::nullopt);
+}
+
 TEST(OrderBook, IdCanBeReusedAfterCancel) {
     lob::OrderBook book;
     book.add(buy(1, 100, 5));

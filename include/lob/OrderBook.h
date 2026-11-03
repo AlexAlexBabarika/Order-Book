@@ -1,4 +1,5 @@
 #pragma once
+#include <ankerl/unordered_dense.h>
 #include <lob/CoreTypes.h>
 #include <lob/OrderPool.h>
 
@@ -8,7 +9,6 @@
 #include <functional>
 #include <map>
 #include <optional>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -44,10 +44,11 @@ class OrderBook {
     Result submit(Order order, OnFill&& on_fill);
 
    private:
-    using LookupIter = std::unordered_map<OrderId, Slot>::iterator;
+    using OrderIndex = ankerl::unordered_dense::map<OrderId, Slot>;
+    using LookupIter = OrderIndex::iterator;
 
     OrderPool order_pool;
-    std::unordered_map<OrderId, Slot> order_lookup;
+    OrderIndex order_lookup;
     std::map<Price, Level, std::greater<Price>> bid_map;
     std::map<Price, Level, std::less<Price>> ask_map;
 
