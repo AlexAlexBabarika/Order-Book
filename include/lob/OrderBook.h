@@ -1,7 +1,7 @@
 #pragma once
 #include <ankerl/unordered_dense.h>
 #include <lob/CoreTypes.h>
-#include <lob/OrderPool.h>
+#include <lob/Pool.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -48,15 +48,16 @@ class OrderBook {
     using LookupIter = OrderIndex::iterator;
 
     OrderPool order_pool;
+    LevelPool level_pool;
     OrderIndex order_lookup;
-    std::map<Price, Level, std::greater<Price>> bid_map;
-    std::map<Price, Level, std::less<Price>> ask_map;
+    std::map<Price, LevelSlot, std::greater<Price>> bid_map;
+    std::map<Price, LevelSlot, std::less<Price>> ask_map;
 
     LookupIter erase_order(LookupIter iter);
-    void link_back(Level& level, Slot slot);
+    void link_back(LevelSlot level, Slot slot);
     void unlink(Slot slot);
-    Level& level_for(Side side, Price price);
-    void erase_if_empty(const Level& level, Side side);
+    LevelSlot level_for(Side side, Price price);
+    void erase_if_empty(LevelSlot level, Side side);
     const Level* level_at(const Side side, const Price price) const;
     static Result validate(const Order& order);
     static bool crosses(const Order& incoming, const Price price);
@@ -67,7 +68,7 @@ class OrderBook {
     bool can_fill(const Order& incoming) const;
 
     template <typename Book>
-    static bool can_fill_from(const Book& book, const Order& incoming);
+    bool can_fill_from(const Book& book, const Order& incoming) const;
 
     static bool should_rest(const Order& order);
 };
@@ -81,7 +82,8 @@ void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {
             return;
         }
 
-        Level& level = best->second;
+        const LevelSlot level_slot = best->second;
+        Level& level = level_pool[level_slot];
         while (incoming.remaining > 0 && level.head != NIL) {
             const Slot slot = level.head;
             OrderNode& maker = order_pool[slot];
@@ -100,6 +102,7 @@ void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {
 
         if (level.head == NIL) {
             book.erase(best);
+            level_pool.release(level_slot);
         }
     }
 }

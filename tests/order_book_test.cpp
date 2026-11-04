@@ -348,6 +348,41 @@ TEST(OrderBook, FilledMakerFreesSlotForRemainder) {
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 3);
 }
 
+// Each of these empties a level at a new price 100 times on a 4-order book. If emptying a
+// level doesn't release its slot, the level pool runs out at the fifth new price.
+TEST(OrderBook, CancelReleasesEmptiedLevels) {
+    lob::OrderBook book(4);
+    for (OrderId id = 1; id <= 100; ++id) {
+        const Price price = 100 + static_cast<Price>(id);
+        ASSERT_EQ(book.add(buy(id, price, 5)), Result::Ok);
+        ASSERT_EQ(book.cancel(id), Result::Ok);
+    }
+    EXPECT_EQ(book.size(), 0u);
+    EXPECT_EQ(book.best_bid(), std::nullopt);
+}
+
+TEST(OrderBook, MatchReleasesEmptiedLevels) {
+    lob::OrderBook book(4);
+    for (OrderId id = 1; id <= 200; id += 2) {
+        const Price price = 100 + static_cast<Price>(id);
+        ASSERT_EQ(book.add(sell(id, price, 5)), Result::Ok);
+        ASSERT_EQ(book.submit(buy(id + 1, price, 5, Tif::Ioc), [](const Fill&) {}), Result::Ok);
+    }
+    EXPECT_EQ(book.size(), 0u);
+    EXPECT_EQ(book.best_ask(), std::nullopt);
+}
+
+TEST(OrderBook, ModifyReleasesEmptiedLevels) {
+    lob::OrderBook book(4);
+    book.add(buy(1, 100, 5));
+    for (Price price = 101; price <= 200; ++price) {
+        ASSERT_EQ(book.modify(1, price, 5), Result::Ok);
+    }
+    EXPECT_EQ(book.orders_at(Side::Buy, 200), (std::vector<OrderId>{1}));
+    EXPECT_EQ(book.level_qty(Side::Buy, 199), 0);
+    EXPECT_EQ(book.best_bid(), 200);
+}
+
 // Asks: 1 (5) and 2 (7) at 100, 3 (4) at 101, 4 (6) at 103
 // Bids: 5 (3) at 98, 6 (2) at 97
 class Ladder : public ::testing::Test {

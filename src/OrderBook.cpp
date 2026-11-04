@@ -1,5 +1,6 @@
 #include "lob/OrderBook.h"
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 
@@ -10,20 +11,31 @@ namespace lob {
 namespace {
 
 template <typename Book>
-Level& find_or_add_level(Book& book, const Price price) {
-    return book.try_emplace(price, Level{.price = price}).first->second;
+LevelSlot find_or_add_level(Book& book, LevelPool& levels, const Price price) {
+    const auto [iter, inserted] = book.try_emplace(price, NIL);
+    if (inserted) {
+        const LevelSlot slot = levels.acquire();
+        assert(slot != NIL && "level pool ran out: an emptied level wasn't released");
+        // A fresh level, because a free one still holds its free-list link in head
+        levels[slot] = Level{.price = price};
+        iter->second = slot;
+    }
+    return iter->second;
 }
 
 template <typename Book>
-const Level* find_level(const Book& book, const Price price) {
+const Level* find_level(const Book& book, const LevelPool& levels, const Price price) {
     const auto iter = book.find(price);
-    return iter == book.end() ? nullptr : &iter->second;
+    return iter == book.end() ? nullptr : &levels[iter->second];
 }
 
 }  // namespace
 
-// add() stops at a full pool, so the index never grows past this
-OrderBook::OrderBook(const std::uint32_t max_orders) : order_pool(max_orders) {
+// add() stops at a full pool, so the index never grows past this. Every level holds at least
+// one order and is released when it empties, so there are never more levels than orders,
+// and a level pool of the same size can't run out
+OrderBook::OrderBook(const std::uint32_t max_orders)
+    : order_pool(max_orders), level_pool(max_orders) {
     order_lookup.reserve(max_orders);
 }
 
@@ -75,7 +87,8 @@ Result OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQt
 
     const Slot slot = iter->second;
     OrderNode& resting = order_pool[slot];
-    Level& level = *resting.level;
+    const LevelSlot level_slot = resting.level;
+    Level& level = level_pool[level_slot];
     const Qty filled = resting.original - resting.remaining;
 
     if (newPrice == level.price && newQty <= resting.remaining) {
@@ -89,9 +102,10 @@ Result OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQt
     resting.remaining = newQty;
     resting.original = filled + newQty;
     if (newPrice == level.price) {
-        link_back(level, slot);
+        link_back(level_slot, slot);
     } else {
-        erase_if_empty(level, resting.side);
+        // Release before acquiring, so a full book can still move its order to a new price
+        erase_if_empty(level_slot, resting.side);
         link_back(level_for(resting.side, newPrice), slot);
     }
     return Result::Ok;
@@ -156,17 +170,17 @@ std::vector<OrderId> OrderBook::orders_at(const Side side, const Price price) co
 OrderBook::LookupIter OrderBook::erase_order(LookupIter iter) {
     const Slot slot = iter->second;
     const OrderNode& node = order_pool[slot];
-    const Level& level = *node.level;
 
     unlink(slot);
-    erase_if_empty(level, node.side);
+    erase_if_empty(node.level, node.side);
     order_pool.release(slot);
     return order_lookup.erase(iter);
 }
 
-void OrderBook::link_back(Level& level, const Slot slot) {
+void OrderBook::link_back(const LevelSlot level_slot, const Slot slot) {
     OrderNode& node = order_pool[slot];
-    node.level = &level;
+    Level& level = level_pool[level_slot];
+    node.level = level_slot;
     node.prev = level.tail;
     node.next = NIL;
     if (level.tail == NIL) {
@@ -181,7 +195,7 @@ void OrderBook::link_back(Level& level, const Slot slot) {
 
 void OrderBook::unlink(const Slot slot) {
     const OrderNode& node = order_pool[slot];
-    Level& level = *node.level;
+    Level& level = level_pool[node.level];
     if (node.prev == NIL) {
         level.head = node.next;
     } else {
@@ -196,26 +210,27 @@ void OrderBook::unlink(const Slot slot) {
     level.total -= node.remaining;
 }
 
-Level& OrderBook::level_for(const Side side, const Price price) {
-    return side == Side::Buy ? find_or_add_level(bid_map, price)
-                             : find_or_add_level(ask_map, price);
+LevelSlot OrderBook::level_for(const Side side, const Price price) {
+    return side == Side::Buy ? find_or_add_level(bid_map, level_pool, price)
+                             : find_or_add_level(ask_map, level_pool, price);
 }
 
-void OrderBook::erase_if_empty(const Level& level, const Side side) {
+void OrderBook::erase_if_empty(const LevelSlot level_slot, const Side side) {
+    const Level& level = level_pool[level_slot];
     if (level.head != NIL) {
         return;
     }
-    // A copy, because erasing destroys the level that holds it
-    const Price price = level.price;
     if (side == Side::Buy) {
-        bid_map.erase(price);
+        bid_map.erase(level.price);
     } else {
-        ask_map.erase(price);
+        ask_map.erase(level.price);
     }
+    level_pool.release(level_slot);
 }
 
 const Level* OrderBook::level_at(const Side side, const Price price) const {
-    return side == Side::Buy ? find_level(bid_map, price) : find_level(ask_map, price);
+    return side == Side::Buy ? find_level(bid_map, level_pool, price)
+                             : find_level(ask_map, level_pool, price);
 }
 
 Result OrderBook::validate(const Order& order) {
@@ -233,13 +248,13 @@ bool OrderBook::crosses(const Order& incoming, const Price price) {
 }
 
 template <typename Book>
-bool OrderBook::can_fill_from(const Book& book, const Order& incoming) {
+bool OrderBook::can_fill_from(const Book& book, const Order& incoming) const {
     Qty total = 0;
-    for (const auto& [price, level] : book) {
+    for (const auto& [price, level_slot] : book) {
         if (!crosses(incoming, price)) {
             return false;
         }
-        total += level.total;
+        total += level_pool[level_slot].total;
         if (total >= incoming.remaining) {
             return true;
         }

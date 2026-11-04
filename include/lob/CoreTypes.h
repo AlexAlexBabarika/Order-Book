@@ -38,29 +38,30 @@ struct Fill {
 };
 
 using Slot = std::uint32_t;
+using LevelSlot = std::uint32_t;
 constexpr Slot NIL = UINT32_MAX;
 
 struct Level {
     Price price;
     Qty total = 0;
-    Slot head = NIL;
+    Slot head = NIL;  // also links the free list while the level is free
     Slot tail = NIL;
     std::uint32_t count = 0;
 };
 static_assert(sizeof(Level) == 32);
 
-// Step 7 swaps Level* for a 4-byte level slot, which brings this to 40 bytes
+// Matching reads the first two fields on every fill
 struct OrderNode {
     OrderId id;
     Qty remaining;
     Qty original;
-    Level* level = nullptr;
     Slot prev = NIL;
     Slot next = NIL;  // also links the free list while the slot is free
+    LevelSlot level = NIL;
     Side side;
     Tif tif;
 };
-static_assert(sizeof(OrderNode) == 48);
+static_assert(sizeof(OrderNode) == 40);
 
 std::string formatRawPrice(Price price);
 
