@@ -3,10 +3,12 @@
 
 #include <cstddef>
 #include <cstdlib>
+#include <functional>
 #include <new>
 #include <vector>
 
 #include "Workload.h"
+#include "lob/PriceLadder.h"
 
 namespace {
 std::size_t g_allocs = 0;
@@ -46,5 +48,25 @@ TEST(HotPath, NoAllocationAfterWarmUp) {
     const std::size_t allocs = g_allocs - before;
 
     EXPECT_EQ(allocs, 0u) << static_cast<double>(allocs) / MEASURED << " allocations per message";
+}
+
+TEST(PriceLadder, NoAllocationAfterReserve) {
+    constexpr std::size_t LEVELS = 1000;
+    PriceLadder<std::greater<Price>> ladder;
+    ladder.reserve(LEVELS);
+
+    const std::size_t before = g_allocs;
+    for (std::size_t i = 0; i < LEVELS; ++i) {
+        // 7919 is prime, so this visits every price once, landing at the front, middle and back
+        const auto price = static_cast<Price>(i * 7919 % LEVELS);
+        ladder.try_emplace(price).first = static_cast<LevelSlot>(i);
+    }
+    for (Price price = 0; price < static_cast<Price>(LEVELS); price += 2) {
+        ladder.erase(price);
+    }
+    while (!ladder.empty()) {
+        ladder.pop_best();
+    }
+    EXPECT_EQ(g_allocs - before, 0u);
 }
 }  // namespace

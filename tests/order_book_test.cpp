@@ -493,6 +493,24 @@ TEST_F(Ladder, BuySweepsLevelsUpToLimit) {
     EXPECT_EQ(book.size(), 3u);
 }
 
+// The levels arrive as new worst, new best and in between, so the sweep only comes out in
+// price order if the book keeps them sorted
+TEST(OrderBook, SweepFillsLevelsAddedOutOfOrder) {
+    lob::OrderBook book;
+    book.add(sell(1, 102, 1));
+    book.add(sell(2, 104, 1));
+    book.add(sell(3, 100, 1));
+    book.add(sell(4, 103, 1));
+    book.add(sell(5, 101, 1));
+    Order taker = buy(10, 0, 5);
+    taker.type = OrderType::Market;
+
+    std::vector<Price> prices;
+    book.match(taker, [&prices](const Fill& fill) { prices.push_back(fill.price); });
+    EXPECT_EQ(prices, (std::vector<Price>{100, 101, 102, 103, 104}));
+    EXPECT_EQ(book.best_ask(), std::nullopt);
+}
+
 TEST_F(Ladder, SellSweepsBidsFromHighest) {
     EXPECT_EQ(take(sell(10, 97, 4)), 0);
     EXPECT_EQ(fills, (std::vector<Fill>{{.maker = 5, .taker = 10, .price = 98, .qty = 3},

@@ -2,12 +2,12 @@
 #include <ankerl/unordered_dense.h>
 #include <lob/CoreTypes.h>
 #include <lob/Pool.h>
+#include <lob/PriceLadder.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -50,8 +50,8 @@ class OrderBook {
     OrderPool order_pool;
     LevelPool level_pool;
     OrderIndex order_lookup;
-    std::map<Price, LevelSlot, std::greater<Price>> bid_map;
-    std::map<Price, LevelSlot, std::less<Price>> ask_map;
+    PriceLadder<std::greater<Price>> bid_ladder;
+    PriceLadder<std::less<Price>> ask_ladder;
 
     LookupIter erase_order(LookupIter iter);
     void link_back(LevelSlot level, Slot slot);
@@ -76,13 +76,12 @@ class OrderBook {
 template <typename Book, typename OnFill>
 void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {
     while (incoming.remaining > 0 && !book.empty()) {
-        const auto best = book.begin();
-        const Price price = best->first;
+        const Price price = book.best_price();
         if (!crosses(incoming, price)) {
             return;
         }
 
-        const LevelSlot level_slot = best->second;
+        const LevelSlot level_slot = book.best_slot();
         Level& level = level_pool[level_slot];
         while (incoming.remaining > 0 && level.head != NIL) {
             const Slot slot = level.head;
@@ -101,7 +100,7 @@ void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {
         }
 
         if (level.head == NIL) {
-            book.erase(best);
+            book.pop_best();
             level_pool.release(level_slot);
         }
     }
@@ -110,9 +109,9 @@ void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {
 template <typename OnFill>
 void OrderBook::match(Order& incoming, OnFill&& on_fill) {
     if (incoming.side == Side::Buy) {
-        match_against(ask_map, incoming, on_fill);
+        match_against(ask_ladder, incoming, on_fill);
     } else {
-        match_against(bid_map, incoming, on_fill);
+        match_against(bid_ladder, incoming, on_fill);
     }
 }
 
