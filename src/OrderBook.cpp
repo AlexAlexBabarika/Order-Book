@@ -35,16 +35,21 @@ const Level* find_level(const Book& book, const LevelPool& levels, const Price p
 // one order and is released when it empties, so there are never more levels than orders,
 // and a level pool of the same size can't run out. Neither can a ladder, since one side
 // never has more levels than the whole book has orders
-OrderBook::OrderBook(const std::uint32_t max_orders)
-    : order_pool(max_orders), level_pool(max_orders) {
+OrderBook::OrderBook(const std::uint32_t max_orders, const PriceBand band)
+    : order_pool(max_orders),
+      level_pool(max_orders),
+      band(band),
+      bid_levels(band, max_orders),
+      ask_levels(band, max_orders) {
     order_lookup.reserve(max_orders);
-    bid_ladder.reserve(max_orders);
-    ask_ladder.reserve(max_orders);
 }
 
 Result OrderBook::add(const Order& order) {
     if (const Result result = validate(order); result != Result::Ok) {
         return result;
+    }
+    if (!band.contains(order.price)) {
+        return Result::OutOfBand;
     }
     if (order_pool.full()) {
         return Result::BookFull;
@@ -88,6 +93,10 @@ Result OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQt
         return Result::Ok;
     }
 
+    if (!band.contains(newPrice)) {
+        return Result::OutOfBand;
+    }
+
     const Slot slot = iter->second;
     OrderNode& resting = order_pool[slot];
     const LevelSlot level_slot = resting.level;
@@ -115,17 +124,17 @@ Result OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQt
 }
 
 std::optional<Price> OrderBook::best_bid() const {
-    if (bid_ladder.empty()) {
+    if (bid_levels.empty()) {
         return std::nullopt;
     }
-    return bid_ladder.best_price();
+    return bid_levels.best_price();
 }
 
 std::optional<Price> OrderBook::best_ask() const {
-    if (ask_ladder.empty()) {
+    if (ask_levels.empty()) {
         return std::nullopt;
     }
-    return ask_ladder.best_price();
+    return ask_levels.best_price();
 }
 
 std::optional<Price> OrderBook::spread() const {
@@ -214,8 +223,8 @@ void OrderBook::unlink(const Slot slot) {
 }
 
 LevelSlot OrderBook::level_for(const Side side, const Price price) {
-    return side == Side::Buy ? find_or_add_level(bid_ladder, level_pool, price)
-                             : find_or_add_level(ask_ladder, level_pool, price);
+    return side == Side::Buy ? find_or_add_level(bid_levels, level_pool, price)
+                             : find_or_add_level(ask_levels, level_pool, price);
 }
 
 void OrderBook::erase_if_empty(const LevelSlot level_slot, const Side side) {
@@ -224,16 +233,16 @@ void OrderBook::erase_if_empty(const LevelSlot level_slot, const Side side) {
         return;
     }
     if (side == Side::Buy) {
-        bid_ladder.erase(level.price);
+        bid_levels.erase(level.price);
     } else {
-        ask_ladder.erase(level.price);
+        ask_levels.erase(level.price);
     }
     level_pool.release(level_slot);
 }
 
 const Level* OrderBook::level_at(const Side side, const Price price) const {
-    return side == Side::Buy ? find_level(bid_ladder, level_pool, price)
-                             : find_level(ask_ladder, level_pool, price);
+    return side == Side::Buy ? find_level(bid_levels, level_pool, price)
+                             : find_level(ask_levels, level_pool, price);
 }
 
 Result OrderBook::validate(const Order& order) {
@@ -253,21 +262,19 @@ bool OrderBook::crosses(const Order& incoming, const Price price) {
 template <typename Book>
 bool OrderBook::can_fill_from(const Book& book, const Order& incoming) const {
     Qty total = 0;
-    for (std::size_t i = book.size(); i-- > 0;) {
-        if (!crosses(incoming, book.price_at(i))) {
+    book.for_each_from_best([&](const Price price, const LevelSlot level_slot) {
+        if (!crosses(incoming, price)) {
             return false;
         }
-        total += level_pool[book.slot_at(i)].total;
-        if (total >= incoming.remaining) {
-            return true;
-        }
-    }
-    return false;
+        total += level_pool[level_slot].total;
+        return total < incoming.remaining;
+    });
+    return total >= incoming.remaining;
 }
 
 bool OrderBook::can_fill(const Order& incoming) const {
-    return incoming.side == Side::Buy ? can_fill_from(ask_ladder, incoming)
-                                      : can_fill_from(bid_ladder, incoming);
+    return incoming.side == Side::Buy ? can_fill_from(ask_levels, incoming)
+                                      : can_fill_from(bid_levels, incoming);
 }
 
 bool OrderBook::should_rest(const Order& order) {

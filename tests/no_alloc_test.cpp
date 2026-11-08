@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "Workload.h"
+#include "lob/PriceArray.h"
 #include "lob/PriceLadder.h"
 
 namespace {
@@ -50,23 +51,31 @@ TEST(HotPath, NoAllocationAfterWarmUp) {
     EXPECT_EQ(allocs, 0u) << static_cast<double>(allocs) / MEASURED << " allocations per message";
 }
 
-TEST(PriceLadder, NoAllocationAfterReserve) {
-    constexpr std::size_t LEVELS = 1000;
-    PriceLadder<std::greater<Price>> ladder;
-    ladder.reserve(LEVELS);
-
+// Fills every price in the band in an order that lands at the front, middle and back, then
+// erases half and pops the rest. Returns the allocations it made.
+template <typename Side>
+std::size_t allocations_while_churning(Side& side, const std::size_t levels) {
     const std::size_t before = g_allocs;
-    for (std::size_t i = 0; i < LEVELS; ++i) {
-        // 7919 is prime, so this visits every price once, landing at the front, middle and back
-        const auto price = static_cast<Price>(i * 7919 % LEVELS);
-        ladder.try_emplace(price).first = static_cast<LevelSlot>(i);
+    for (std::size_t i = 0; i < levels; ++i) {
+        // 7919 is prime, so this visits every price once
+        const auto price = static_cast<Price>(i * 7919 % levels);
+        side.try_emplace(price).first = static_cast<LevelSlot>(i);
     }
-    for (Price price = 0; price < static_cast<Price>(LEVELS); price += 2) {
-        ladder.erase(price);
+    for (Price price = 0; price < static_cast<Price>(levels); price += 2) {
+        side.erase(price);
     }
-    while (!ladder.empty()) {
-        ladder.pop_best();
+    while (!side.empty()) {
+        side.pop_best();
     }
-    EXPECT_EQ(g_allocs - before, 0u);
+    return g_allocs - before;
+}
+
+TEST(PriceLevels, NoAllocationAfterConstruction) {
+    constexpr std::size_t LEVELS = 1000;
+    constexpr PriceBand BAND{.lo = 0, .hi = static_cast<Price>(LEVELS)};
+    PriceLadder<std::greater<Price>> ladder(BAND, LEVELS);
+    PriceArray<std::greater<Price>> array(BAND, LEVELS);
+    EXPECT_EQ(allocations_while_churning(ladder, LEVELS), 0u);
+    EXPECT_EQ(allocations_while_churning(array, LEVELS), 0u);
 }
 }  // namespace

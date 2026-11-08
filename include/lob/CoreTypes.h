@@ -15,7 +15,14 @@ enum class Side : std::uint8_t { Buy, Sell };
 enum class Tif : std::uint8_t { Gtc, Ioc, Fok, Day };
 enum class OrderType : std::uint8_t { Market, Limit };
 
-enum class Result : std::uint8_t { Ok, DuplicateId, UnknownId, BadQty, BookFull };
+enum class Result : std::uint8_t { Ok, DuplicateId, UnknownId, BadQty, BookFull, OutOfBand };
+
+struct PriceBand {
+    Price lo;
+    Price hi;
+
+    constexpr bool contains(const Price price) const { return lo <= price && price < hi; }
+};
 
 struct Order {
     OrderId id;

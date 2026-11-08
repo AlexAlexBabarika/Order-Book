@@ -2,6 +2,7 @@
 #include <ankerl/unordered_dense.h>
 #include <lob/CoreTypes.h>
 #include <lob/Pool.h>
+#include <lob/PriceArray.h>
 #include <lob/PriceLadder.h>
 
 #include <algorithm>
@@ -14,11 +15,22 @@
 
 namespace lob {
 
+// The array won the replay in step 8. The CMake option LOB_PRICE_LADDER puts the ladder back
+#ifdef LOB_PRICE_LADDER
+template <typename Better>
+using PriceLevels = PriceLadder<Better>;
+#else
+template <typename Better>
+using PriceLevels = PriceArray<Better>;
+#endif
+
 class OrderBook {
    public:
     static constexpr std::uint32_t DEFAULT_MAX_ORDERS = 1 << 16;
+    static constexpr PriceBand DEFAULT_BAND{.lo = 0, .hi = 1 << 16};
 
-    explicit OrderBook(std::uint32_t max_orders = DEFAULT_MAX_ORDERS);
+    explicit OrderBook(std::uint32_t max_orders = DEFAULT_MAX_ORDERS,
+                       PriceBand band = DEFAULT_BAND);
     OrderBook(const OrderBook&) = delete;
     OrderBook& operator=(const OrderBook&) = delete;
     OrderBook(OrderBook&&) = default;
@@ -50,8 +62,9 @@ class OrderBook {
     OrderPool order_pool;
     LevelPool level_pool;
     OrderIndex order_lookup;
-    PriceLadder<std::greater<Price>> bid_ladder;
-    PriceLadder<std::less<Price>> ask_ladder;
+    PriceBand band;
+    PriceLevels<std::greater<Price>> bid_levels;
+    PriceLevels<std::less<Price>> ask_levels;
 
     LookupIter erase_order(LookupIter iter);
     void link_back(LevelSlot level, Slot slot);
@@ -109,9 +122,9 @@ void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {
 template <typename OnFill>
 void OrderBook::match(Order& incoming, OnFill&& on_fill) {
     if (incoming.side == Side::Buy) {
-        match_against(ask_ladder, incoming, on_fill);
+        match_against(ask_levels, incoming, on_fill);
     } else {
-        match_against(bid_ladder, incoming, on_fill);
+        match_against(bid_levels, incoming, on_fill);
     }
 }
 
@@ -119,6 +132,10 @@ template <typename OnFill>
 Result OrderBook::submit(Order order, OnFill&& on_fill) {
     if (const Result result = validate(order); result != Result::Ok) {
         return result;
+    }
+
+    if (order.type == OrderType::Limit && !band.contains(order.price)) {
+        return Result::OutOfBand;
     }
 
     if (contains(order.id)) {

@@ -31,6 +31,9 @@ void PrintTo(const Result result, std::ostream* os) {
         case Result::BookFull:
             *os << "BookFull";
             return;
+        case Result::OutOfBand:
+            *os << "OutOfBand";
+            return;
     }
 }
 }  // namespace lob
@@ -337,6 +340,54 @@ TEST(OrderBook, SubmitReportsFullBook) {
     EXPECT_EQ(book.submit(buy(2, 100, 3), [](const Fill&) {}), Result::BookFull);
     EXPECT_FALSE(book.contains(2));
     EXPECT_EQ(book.best_bid(), std::nullopt);
+}
+
+constexpr PriceBand BAND_100_200{.lo = 100, .hi = 200};
+
+// The band includes lo and excludes hi
+TEST(OrderBook, AddOutsideBandIsRejected) {
+    lob::OrderBook book(16, BAND_100_200);
+    EXPECT_EQ(book.add(buy(1, 99, 5)), Result::OutOfBand);
+    EXPECT_EQ(book.add(sell(2, 200, 5)), Result::OutOfBand);
+    EXPECT_EQ(book.add(buy(3, 100, 5)), Result::Ok);
+    EXPECT_EQ(book.add(sell(4, 199, 5)), Result::Ok);
+    EXPECT_EQ(book.size(), 2u);
+}
+
+TEST(OrderBook, SubmitOutsideBandDoesNotTrade) {
+    lob::OrderBook book(16, BAND_100_200);
+    book.add(sell(1, 150, 5));
+    std::vector<Fill> fills;
+    const auto on_fill = [&fills](const Fill& fill) { fills.push_back(fill); };
+    EXPECT_EQ(book.submit(buy(2, 250, 5), on_fill), Result::OutOfBand);
+    EXPECT_TRUE(fills.empty());
+    EXPECT_EQ(book.level_qty(Side::Sell, 150), 5);
+}
+
+TEST(OrderBook, MarketOrderIgnoresBand) {
+    lob::OrderBook book(16, BAND_100_200);
+    book.add(sell(1, 150, 5));
+    Order taker = buy(2, 0, 5);
+    taker.type = OrderType::Market;
+    std::size_t fills = 0;
+    EXPECT_EQ(book.submit(taker, [&fills](const Fill&) { ++fills; }), Result::Ok);
+    EXPECT_EQ(fills, 1u);
+    EXPECT_EQ(book.size(), 0u);
+}
+
+TEST(OrderBook, ModifyOutsideBandKeepsOrder) {
+    lob::OrderBook book(16, BAND_100_200);
+    book.add(buy(1, 150, 5));
+    EXPECT_EQ(book.modify(1, 200, 3), Result::OutOfBand);
+    EXPECT_EQ(book.orders_at(Side::Buy, 150), (std::vector<OrderId>{1}));
+    EXPECT_EQ(book.level_qty(Side::Buy, 150), 5);
+}
+
+TEST(OrderBook, ModifyToZeroQtyCancelsWhateverThePrice) {
+    lob::OrderBook book(16, BAND_100_200);
+    book.add(buy(1, 150, 5));
+    EXPECT_EQ(book.modify(1, 999, 0), Result::Ok);
+    EXPECT_FALSE(book.contains(1));
 }
 
 TEST(OrderBook, FilledMakerFreesSlotForRemainder) {

@@ -11,19 +11,24 @@ namespace lob {
 template <typename Better>
 class PriceLadder {
    public:
-    void reserve(const std::size_t n) {
-        prices_.resize(n);
+    PriceLadder(PriceBand, const std::size_t max_levels) {
+        prices_.resize(max_levels);
         prices_.clear();
-        slots_.resize(n);
+        slots_.resize(max_levels);
         slots_.clear();
     }
 
     bool empty() const { return prices_.empty(); }
     std::size_t size() const { return prices_.size(); }
 
-    // Index size() - 1 is the best price, and index 0 the worst
-    Price price_at(const std::size_t i) const { return prices_[i]; }
-    LevelSlot slot_at(const std::size_t i) const { return slots_[i]; }
+    template <typename Visit>
+    void for_each_from_best(Visit visit) const {
+        for (std::size_t i = prices_.size(); i-- > 0;) {
+            if (!visit(prices_[i], slots_[i])) {
+                return;
+            }
+        }
+    }
 
     Price best_price() const { return prices_.back(); }
     LevelSlot best_slot() const { return slots_.back(); }
@@ -48,7 +53,6 @@ class PriceLadder {
         return {slots_[i], true};
     }
 
-    // Does nothing if the price isn't there, like std::map::erase(key)
     void erase(const Price price) {
         const std::size_t i = past_better(price);
         if (!holds(i, price)) {
