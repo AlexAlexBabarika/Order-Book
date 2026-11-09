@@ -15,7 +15,20 @@ enum class Side : std::uint8_t { Buy, Sell };
 enum class Tif : std::uint8_t { Gtc, Ioc, Fok, Day };
 enum class OrderType : std::uint8_t { Market, Limit };
 
-enum class Result : std::uint8_t { Ok, DuplicateId, UnknownId, BadQty, BookFull, OutOfBand };
+enum class Result : std::uint8_t { Ok, UnknownId, BadQty, BookFull, OutOfBand };
+
+// The book hands out order ids. No id it hands out is ever NO_ORDER
+constexpr OrderId NO_ORDER = UINT64_MAX;
+
+// What add() and submit() return. id is NO_ORDER only if the order was turned away before it
+// got one. submit() gives the id before matching, so fills can name it, and returns it even
+// when the order then doesn't rest
+struct Placed {
+    Result result;
+    OrderId id = NO_ORDER;
+
+    bool operator==(const Placed&) const = default;
+};
 
 struct PriceBand {
     Price lo;
@@ -24,8 +37,8 @@ struct PriceBand {
     constexpr bool contains(const Price price) const { return lo <= price && price < hi; }
 };
 
+// What a client sends. It has no id: the book assigns one
 struct Order {
-    OrderId id;
     Price price;
     Qty original;
     Qty remaining = original;
@@ -33,7 +46,7 @@ struct Order {
     Tif tif;
     OrderType type = OrderType::Limit;
 };
-static_assert(sizeof(Order) == 40);
+static_assert(sizeof(Order) == 32);
 
 struct Fill {
     OrderId maker;
@@ -57,14 +70,16 @@ struct Level {
 };
 static_assert(sizeof(Level) == 32);
 
-// Matching reads the first two fields on every fill
+// Matching reads the fields before original on every fill
 struct OrderNode {
-    OrderId id;
     Qty remaining;
-    Qty original;
+    // Goes up by one each time the slot is taken or freed, so it's odd while the slot holds a
+    // live order. An order's id is its slot plus this, so the id dies with the order
+    std::uint32_t generation = 0;
     Slot prev = NIL;
     Slot next = NIL;  // also links the free list while the slot is free
     LevelSlot level = NIL;
+    Qty original;
     Side side;
     Tif tif;
 };

@@ -22,20 +22,12 @@ FetchContent_Declare(
   GIT_SHALLOW TRUE
   GIT_TAG        v1.9.5
 )
-FetchContent_Declare(
-  unordered_dense
-  GIT_REPOSITORY https://github.com/martinus/unordered_dense.git
-  GIT_SHALLOW TRUE
-  GIT_TAG        v5.3.2
-  SYSTEM
-)
-FetchContent_MakeAvailable(googletest benchmark unordered_dense)
+FetchContent_MakeAvailable(googletest benchmark)
 
 add_library(lob src/OrderBook.cpp src/lob_version.cpp src/CoreTypes.cpp)
 target_compile_features(lob PUBLIC cxx_std_20)
 target_include_directories(lob PUBLIC include)
 
-target_link_libraries(lob PUBLIC unordered_dense::unordered_dense)
 option(LOB_PRICE_LADDER "Hold price levels in PriceLadder, not PriceArray" OFF)
 if(LOB_PRICE_LADDER)
   target_compile_definitions(lob PUBLIC LOB_PRICE_LADDER)

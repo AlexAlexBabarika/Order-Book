@@ -43,9 +43,9 @@ class Generator {
     std::uniform_int_distribution<Qty> qty{1, 100};
     std::uniform_int_distribution<Price> cross{1, 6};
 
+    // Built like the book the stream is replayed on, so it hands out the same ids
     OrderBook scratch;
     std::vector<LiveOrder> live;
-    OrderId next_id = 0;
 
     Side side() { return coin(rng) ? Side::Buy : Side::Sell; }
 
@@ -54,31 +54,26 @@ class Generator {
         return side == Side::Buy ? MID - ticks : MID + ticks;
     }
 
-    Message submit(const Order& order) {
-        scratch.submit(order, [](const Fill&) {});
-        return {.type = MsgType::Submit, .order = order};
-    }
+    // Returns the id the scratch book gave the order
+    OrderId send(const Order& order) { return scratch.submit(order, [](const Fill&) {}).id; }
 
     Message rest() {
         const Side s = side();
-        const Order order{.id = next_id++,
-                          .price = passive_price(s),
-                          .original = qty(rng),
-                          .side = s,
-                          .tif = Tif::Gtc};
-        live.push_back({order.id, s});
-        return submit(order);
+        const Order order{
+            .price = passive_price(s), .original = qty(rng), .side = s, .tif = Tif::Gtc};
+        live.push_back({send(order), s});
+        return {.type = MsgType::Submit, .order = order};
     }
 
     Message take() {
         const Side s = side();
         const Price ticks = cross(rng);
-        const Order order{.id = next_id++,
-                          .price = s == Side::Buy ? MID + ticks : MID - ticks,
+        const Order order{.price = s == Side::Buy ? MID + ticks : MID - ticks,
                           .original = qty(rng),
                           .side = s,
                           .tif = Tif::Ioc};
-        return submit(order);
+        send(order);
+        return {.type = MsgType::Submit, .order = order};
     }
 
     Message cancel() {

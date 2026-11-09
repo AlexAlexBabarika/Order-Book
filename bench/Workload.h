@@ -21,7 +21,8 @@ struct Message {
     Qty new_qty;      // Modify
 };
 
-// Replayed in order on an empty book, every cancel and modify targets a live order
+// Replayed in order on an empty, default-built book, every cancel and modify targets a live
+// order. Its ids are the ones that book hands out
 std::vector<Message> make_workload(std::size_t count, std::uint64_t seed);
 
 template <typename OnFill>

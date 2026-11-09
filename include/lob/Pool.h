@@ -26,6 +26,7 @@ class Pool {
     }
 
     bool full() const { return free_head_ == NIL; }
+    std::uint32_t capacity() const { return static_cast<std::uint32_t>(nodes_.size()); }
 
     Slot acquire() {
         const Slot s = free_head_;

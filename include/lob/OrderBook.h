@@ -1,5 +1,4 @@
 #pragma once
-#include <ankerl/unordered_dense.h>
 #include <lob/CoreTypes.h>
 #include <lob/Pool.h>
 #include <lob/PriceArray.h>
@@ -10,7 +9,6 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
-#include <utility>
 #include <vector>
 
 namespace lob {
@@ -29,6 +27,7 @@ class OrderBook {
     static constexpr std::uint32_t DEFAULT_MAX_ORDERS = 1 << 16;
     static constexpr PriceBand DEFAULT_BAND{.lo = 0, .hi = 1 << 16};
 
+    // At most max_orders orders rest at once
     explicit OrderBook(std::uint32_t max_orders = DEFAULT_MAX_ORDERS,
                        PriceBand band = DEFAULT_BAND);
     OrderBook(const OrderBook&) = delete;
@@ -36,9 +35,10 @@ class OrderBook {
     OrderBook(OrderBook&&) = default;
     OrderBook& operator=(OrderBook&&) = default;
 
-    Result add(const Order& order);
-    Result cancel(const OrderId id);
-    Result modify(const OrderId id, const Price newPrice, const Qty newQty);
+    // Rests the order without matching it
+    Placed add(const Order& order);
+    Result cancel(OrderId id);
+    Result modify(OrderId id, Price newPrice, Qty newQty);
     std::optional<Price> best_bid() const;
     std::optional<Price> best_ask() const;
     std::optional<Price> spread() const;
@@ -49,24 +49,34 @@ class OrderBook {
     Qty level_qty(Side side, Price price) const;
     std::vector<OrderId> orders_at(Side side, Price price) const;
 
+    // Matches the order, then rests what's left if its type and tif allow it
     template <typename OnFill>
-    void match(Order& incoming, OnFill&& on_fill);
-
-    template <typename OnFill>
-    Result submit(Order order, OnFill&& on_fill);
+    Placed submit(Order order, OnFill&& on_fill);
 
    private:
-    using OrderIndex = ankerl::unordered_dense::map<OrderId, Slot>;
-    using LookupIter = OrderIndex::iterator;
-
+    // The pool holds one slot more than max_orders, so submit always has a slot for the
+    // incoming order while it matches, even when the book is full
     OrderPool order_pool;
     LevelPool level_pool;
-    OrderIndex order_lookup;
     PriceBand band;
     PriceLevels<std::greater<Price>> bid_levels;
     PriceLevels<std::less<Price>> ask_levels;
+    std::uint32_t max_orders;
+    std::uint32_t resting_orders = 0;
 
-    LookupIter erase_order(LookupIter iter);
+    // An id is the slot in the low 32 bits and the slot's generation in the high 32
+    static OrderId make_id(const Slot slot, const std::uint32_t generation) {
+        return (static_cast<OrderId>(generation) << 32) | slot;
+    }
+    OrderId id_of(const Slot slot) const { return make_id(slot, order_pool[slot].generation); }
+    // NIL unless the id belongs to an order in the book
+    Slot find(OrderId id) const;
+    bool full() const { return resting_orders == max_orders; }
+
+    Slot open_slot();
+    void close_slot(Slot slot);
+    void rest(Slot slot, const Order& order);
+    void erase_order(Slot slot);
     void link_back(LevelSlot level, Slot slot);
     void unlink(Slot slot);
     LevelSlot level_for(Side side, Price price);
@@ -75,8 +85,11 @@ class OrderBook {
     static Result validate(const Order& order);
     static bool crosses(const Order& incoming, const Price price);
 
+    template <typename OnFill>
+    void match(Order& incoming, OrderId taker, OnFill& on_fill);
+
     template <typename Book, typename OnFill>
-    void match_against(Book& book, Order& incoming, OnFill& on_fill);
+    void match_against(Book& book, Order& incoming, OrderId taker, OnFill& on_fill);
 
     bool can_fill(const Order& incoming) const;
 
@@ -87,7 +100,7 @@ class OrderBook {
 };
 
 template <typename Book, typename OnFill>
-void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {
+void OrderBook::match_against(Book& book, Order& incoming, const OrderId taker, OnFill& on_fill) {
     while (incoming.remaining > 0 && !book.empty()) {
         const Price price = book.best_price();
         if (!crosses(incoming, price)) {
@@ -103,12 +116,15 @@ void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {
             maker.remaining -= qty;
             incoming.remaining -= qty;
             level.total -= qty;
-            on_fill(Fill{.maker = maker.id, .taker = incoming.id, .price = price, .qty = qty});
+            on_fill(Fill{.maker = make_id(slot, maker.generation),
+                         .taker = taker,
+                         .price = price,
+                         .qty = qty});
 
             if (maker.remaining == 0) {
-                order_lookup.erase(maker.id);
                 unlink(slot);
-                order_pool.release(slot);
+                close_slot(slot);
+                --resting_orders;
             }
         }
 
@@ -120,37 +136,45 @@ void OrderBook::match_against(Book& book, Order& incoming, OnFill& on_fill) {
 }
 
 template <typename OnFill>
-void OrderBook::match(Order& incoming, OnFill&& on_fill) {
+void OrderBook::match(Order& incoming, const OrderId taker, OnFill& on_fill) {
     if (incoming.side == Side::Buy) {
-        match_against(ask_levels, incoming, on_fill);
+        match_against(ask_levels, incoming, taker, on_fill);
     } else {
-        match_against(bid_levels, incoming, on_fill);
+        match_against(bid_levels, incoming, taker, on_fill);
     }
 }
 
 template <typename OnFill>
-Result OrderBook::submit(Order order, OnFill&& on_fill) {
+Placed OrderBook::submit(Order order, OnFill&& on_fill) {
     if (const Result result = validate(order); result != Result::Ok) {
-        return result;
+        return {.result = result};
     }
 
     if (order.type == OrderType::Limit && !band.contains(order.price)) {
-        return Result::OutOfBand;
+        return {.result = Result::OutOfBand};
     }
 
-    if (contains(order.id)) {
-        return Result::DuplicateId;
-    }
+    // Fills name the taker, so the order takes its slot, and with it its id, before it trades
+    const Slot slot = open_slot();
+    const OrderId id = id_of(slot);
 
     if (order.tif == Tif::Fok && !can_fill(order)) {
-        return Result::Ok;
+        close_slot(slot);
+        return {.result = Result::Ok, .id = id};
     }
 
-    match(order, std::forward<OnFill>(on_fill));
+    match(order, id, on_fill);
 
-    if (should_rest(order)) {
-        return add(order);
+    if (!should_rest(order)) {
+        close_slot(slot);
+        return {.result = Result::Ok, .id = id};
     }
-    return Result::Ok;
+    // Checked after matching, because filled makers free room for the remainder
+    if (full()) {
+        close_slot(slot);
+        return {.result = Result::BookFull, .id = id};
+    }
+    rest(slot, order);
+    return {.result = Result::Ok, .id = id};
 }
 }  // namespace lob

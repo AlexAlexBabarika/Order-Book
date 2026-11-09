@@ -31,65 +31,55 @@ const Level* find_level(const Book& book, const LevelPool& levels, const Price p
 
 }  // namespace
 
-// add() stops at a full pool, so the index never grows past this. Every level holds at least
-// one order and is released when it empties, so there are never more levels than orders,
-// and a level pool of the same size can't run out. Neither can a ladder, since one side
-// never has more levels than the whole book has orders
+// No more than max_orders orders rest, plus one in submit while it matches. Every level holds
+// at least one resting order and is released when it empties, so there are never more levels
+// than max_orders, and a level pool of that size can't run out. Neither can a ladder, since
+// one side never has more levels than the whole book has orders
 OrderBook::OrderBook(const std::uint32_t max_orders, const PriceBand band)
-    : order_pool(max_orders),
+    : order_pool(max_orders + 1),
       level_pool(max_orders),
       band(band),
       bid_levels(band, max_orders),
-      ask_levels(band, max_orders) {
-    order_lookup.reserve(max_orders);
+      ask_levels(band, max_orders),
+      max_orders(max_orders) {
+    // Slot NIL can't be handed out
+    assert(max_orders < NIL - 1);
 }
 
-Result OrderBook::add(const Order& order) {
+Placed OrderBook::add(const Order& order) {
     if (const Result result = validate(order); result != Result::Ok) {
-        return result;
+        return {.result = result};
     }
     if (!band.contains(order.price)) {
-        return Result::OutOfBand;
+        return {.result = Result::OutOfBand};
     }
-    if (order_pool.full()) {
-        return Result::BookFull;
-    }
-
-    const auto [iter, inserted] = order_lookup.try_emplace(order.id);
-    if (!inserted) {
-        return Result::DuplicateId;
+    if (full()) {
+        return {.result = Result::BookFull};
     }
 
-    const Slot slot = order_pool.acquire();
-    iter->second = slot;
-    order_pool[slot] = {.id = order.id,
-                        .remaining = order.remaining,
-                        .original = order.original,
-                        .side = order.side,
-                        .tif = order.tif};
-    link_back(level_for(order.side, order.price), slot);
-    return Result::Ok;
+    const Slot slot = open_slot();
+    rest(slot, order);
+    return {.result = Result::Ok, .id = id_of(slot)};
 }
 
 Result OrderBook::cancel(const OrderId id) {
-    const auto iter = order_lookup.find(id);
-    if (iter == order_lookup.end()) {
+    const Slot slot = find(id);
+    if (slot == NIL) {
         return Result::UnknownId;
     }
 
-    erase_order(iter);
+    erase_order(slot);
     return Result::Ok;
 }
 
 Result OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQty) {
-    auto iter = order_lookup.find(id);
-
-    if (iter == order_lookup.end()) {
+    const Slot slot = find(id);
+    if (slot == NIL) {
         return Result::UnknownId;
     }
 
     if (newQty <= 0) {
-        erase_order(iter);
+        erase_order(slot);
         return Result::Ok;
     }
 
@@ -97,7 +87,6 @@ Result OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQt
         return Result::OutOfBand;
     }
 
-    const Slot slot = iter->second;
     OrderNode& resting = order_pool[slot];
     const LevelSlot level_slot = resting.level;
     Level& level = level_pool[level_slot];
@@ -146,19 +135,19 @@ std::optional<Price> OrderBook::spread() const {
     return *ask - *bid;
 }
 
+// Walks every slot, which is fine once a session
 void OrderBook::end_session() {
-    for (auto iter = order_lookup.begin(); iter != order_lookup.end();) {
-        if (order_pool[iter->second].tif == Tif::Day) {
-            iter = erase_order(iter);
-        } else {
-            ++iter;
+    for (Slot slot = 0; slot < order_pool.capacity(); ++slot) {
+        const OrderNode& node = order_pool[slot];
+        if (node.generation % 2 == 1 && node.tif == Tif::Day) {
+            erase_order(slot);
         }
     }
 }
 
-std::size_t OrderBook::size() const { return order_lookup.size(); }
+std::size_t OrderBook::size() const { return resting_orders; }
 
-bool OrderBook::contains(OrderId id) const { return order_lookup.contains(id); }
+bool OrderBook::contains(const OrderId id) const { return find(id) != NIL; }
 
 Qty OrderBook::level_qty(const Side side, const Price price) const {
     const Level* level = level_at(side, price);
@@ -174,19 +163,52 @@ std::vector<OrderId> OrderBook::orders_at(const Side side, const Price price) co
 
     ids.reserve(level->count);
     for (Slot slot = level->head; slot != NIL; slot = order_pool[slot].next) {
-        ids.push_back(order_pool[slot].id);
+        ids.push_back(id_of(slot));
     }
     return ids;
 }
 
-OrderBook::LookupIter OrderBook::erase_order(LookupIter iter) {
-    const Slot slot = iter->second;
-    const OrderNode& node = order_pool[slot];
+Slot OrderBook::find(const OrderId id) const {
+    const auto slot = static_cast<Slot>(id);
+    const auto generation = static_cast<std::uint32_t>(id >> 32);
+    // An even generation is never handed out, and a free slot's generation is always even
+    if (generation % 2 == 0 || slot >= order_pool.capacity() ||
+        order_pool[slot].generation != generation) {
+        return NIL;
+    }
+    return slot;
+}
 
+// The generation turns odd, which brings the slot's next id to life
+Slot OrderBook::open_slot() {
+    const Slot slot = order_pool.acquire();
+    assert(slot != NIL && "the order pool keeps a slot spare for submit");
+    ++order_pool[slot].generation;
+    return slot;
+}
+
+// The generation turns even, so the id stops matching before the slot can be reused
+void OrderBook::close_slot(const Slot slot) {
+    ++order_pool[slot].generation;
+    order_pool.release(slot);
+}
+
+void OrderBook::rest(const Slot slot, const Order& order) {
+    OrderNode& node = order_pool[slot];
+    node.remaining = order.remaining;
+    node.original = order.original;
+    node.side = order.side;
+    node.tif = order.tif;
+    link_back(level_for(order.side, order.price), slot);
+    ++resting_orders;
+}
+
+void OrderBook::erase_order(const Slot slot) {
+    const OrderNode& node = order_pool[slot];
     unlink(slot);
     erase_if_empty(node.level, node.side);
-    order_pool.release(slot);
-    return order_lookup.erase(iter);
+    close_slot(slot);
+    --resting_orders;
 }
 
 void OrderBook::link_back(const LevelSlot level_slot, const Slot slot) {
