@@ -414,6 +414,39 @@ TEST(OrderBook, ModifyOutsideBandKeepsOrder) {
     EXPECT_EQ(book.level_qty(Side::Buy, 150), 5);
 }
 
+// Bids are kept under -price, so their band edges are where an off-by-one would show
+TEST(OrderBook, BothSidesWorkAtBothBandEdges) {
+    lob::OrderBook book(16, BAND_100_200);
+    std::vector<Fill> fills;
+    const auto on_fill = [&fills](const Fill& fill) { fills.push_back(fill); };
+
+    const OrderId low_bid = rest(book, buy(100, 5));
+    const OrderId high_bid = rest(book, buy(199, 5));
+    EXPECT_EQ(book.best_bid(), 199);
+    EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{low_bid}));
+    EXPECT_EQ(book.level_qty(Side::Buy, 199), 5);
+    const OrderId seller = book.submit(sell(100, 10, Tif::Ioc), on_fill).id;
+    EXPECT_EQ(fills, (std::vector<Fill>{
+                         {.maker = high_bid, .taker = seller, .price = 199, .qty = 5},
+                         {.maker = low_bid, .taker = seller, .price = 100, .qty = 5},
+                     }));
+    EXPECT_EQ(book.best_bid(), std::nullopt);
+
+    fills.clear();
+    const OrderId low_ask = rest(book, sell(100, 5));
+    const OrderId high_ask = rest(book, sell(199, 5));
+    EXPECT_EQ(book.best_ask(), 100);
+    EXPECT_EQ(book.orders_at(Side::Sell, 199), (std::vector<OrderId>{high_ask}));
+    EXPECT_EQ(book.level_qty(Side::Sell, 100), 5);
+    const OrderId buyer = book.submit(buy(199, 10, Tif::Ioc), on_fill).id;
+    EXPECT_EQ(fills, (std::vector<Fill>{
+                         {.maker = low_ask, .taker = buyer, .price = 100, .qty = 5},
+                         {.maker = high_ask, .taker = buyer, .price = 199, .qty = 5},
+                     }));
+    EXPECT_EQ(book.best_ask(), std::nullopt);
+    EXPECT_EQ(book.size(), 0u);
+}
+
 TEST(OrderBook, ModifyToZeroQtyCancelsWhateverThePrice) {
     lob::OrderBook book(16, BAND_100_200);
     const OrderId id = rest(book, buy(150, 5));

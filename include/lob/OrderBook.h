@@ -5,22 +5,26 @@
 #include <lob/PriceLadder.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <vector>
 
 namespace lob {
 
-// The array won the replay in step 8. The CMake option LOB_PRICE_LADDER puts the ladder back
+// The array won the replay in step 8. The CMake option LOB_PRICE_LADDER puts the ladder back.
+// Both sides use one type, ordered so that a lower key is better: see OrderBook::key()
 #ifdef LOB_PRICE_LADDER
-template <typename Better>
-using PriceLevels = PriceLadder<Better>;
+using PriceLevels = PriceLadder<std::less<Price>>;
 #else
-template <typename Better>
-using PriceLevels = PriceArray<Better>;
+using PriceLevels = PriceArray<std::less<Price>>;
 #endif
+
+// levels is indexed by side
+static_assert(static_cast<int>(Side::Buy) == 0 && static_cast<int>(Side::Sell) == 1);
 
 class OrderBook {
    public:
@@ -59,10 +63,29 @@ class OrderBook {
     OrderPool order_pool;
     LevelPool level_pool;
     PriceBand band;
-    PriceLevels<std::greater<Price>> bid_levels;
-    PriceLevels<std::less<Price>> ask_levels;
+    // Bids, then asks. Indexing by side, not branching on it, matters because sides are
+    // random: the branch was mispredicted on about half of all submits (step 11)
+    std::array<PriceLevels, 2> levels;
     std::uint32_t max_orders;
     std::uint32_t resting_orders = 0;
+
+    // A level's place in its side. Bids are keyed by -price and asks by price, so on both
+    // sides a lower key is better. key() is its own inverse: key(side, key(side, p)) == p
+    static constexpr Price key(const Side side, const Price price) {
+        return side == Side::Buy ? -price : price;
+    }
+    static constexpr Side opposite(const Side side) {
+        return side == Side::Buy ? Side::Sell : Side::Buy;
+    }
+    PriceLevels& levels_of(const Side side) { return levels[static_cast<std::size_t>(side)]; }
+    const PriceLevels& levels_of(const Side side) const {
+        return levels[static_cast<std::size_t>(side)];
+    }
+    // The highest maker key the order trades with
+    static Price limit_key(const Order& incoming) {
+        return incoming.type == OrderType::Market ? std::numeric_limits<Price>::max()
+                                                  : key(opposite(incoming.side), incoming.price);
+    }
 
     // An id is the slot in the low 32 bits and the slot's generation in the high 32
     static OrderId make_id(const Slot slot, const std::uint32_t generation) {
@@ -83,27 +106,21 @@ class OrderBook {
     void erase_if_empty(LevelSlot level, Side side);
     const Level* level_at(const Side side, const Price price) const;
     static Result validate(const Order& order);
-    static bool crosses(const Order& incoming, const Price price);
 
     template <typename OnFill>
     void match(Order& incoming, OrderId taker, OnFill& on_fill);
 
-    template <typename Book, typename OnFill>
-    void match_against(Book& book, Order& incoming, OrderId taker, OnFill& on_fill);
-
     bool can_fill(const Order& incoming) const;
-
-    template <typename Book>
-    bool can_fill_from(const Book& book, const Order& incoming) const;
 
     static bool should_rest(const Order& order);
 };
 
-template <typename Book, typename OnFill>
-void OrderBook::match_against(Book& book, Order& incoming, const OrderId taker, OnFill& on_fill) {
+template <typename OnFill>
+void OrderBook::match(Order& incoming, const OrderId taker, OnFill& on_fill) {
+    PriceLevels& book = levels_of(opposite(incoming.side));
+    const Price limit = limit_key(incoming);
     while (incoming.remaining > 0 && !book.empty()) {
-        const Price price = book.best_price();
-        if (!crosses(incoming, price)) {
+        if (book.best_price() > limit) {
             return;
         }
 
@@ -118,7 +135,7 @@ void OrderBook::match_against(Book& book, Order& incoming, const OrderId taker, 
             level.total -= qty;
             on_fill(Fill{.maker = make_id(slot, maker.generation),
                          .taker = taker,
-                         .price = price,
+                         .price = level.price,
                          .qty = qty});
 
             if (maker.remaining == 0) {
@@ -132,15 +149,6 @@ void OrderBook::match_against(Book& book, Order& incoming, const OrderId taker, 
             book.pop_best();
             level_pool.release(level_slot);
         }
-    }
-}
-
-template <typename OnFill>
-void OrderBook::match(Order& incoming, const OrderId taker, OnFill& on_fill) {
-    if (incoming.side == Side::Buy) {
-        match_against(ask_levels, incoming, taker, on_fill);
-    } else {
-        match_against(bid_levels, incoming, taker, on_fill);
     }
 }
 

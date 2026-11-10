@@ -10,24 +10,9 @@ namespace lob {
 
 namespace {
 
-template <typename Book>
-LevelSlot find_or_add_level(Book& book, LevelPool& levels, const Price price) {
-    auto [level_slot, inserted] = book.try_emplace(price);
-    if (inserted) {
-        const LevelSlot slot = levels.acquire();
-        assert(slot != NIL && "level pool ran out: an emptied level wasn't released");
-        // A fresh level, because a free one still holds its free-list link in head
-        levels[slot] = Level{.price = price};
-        level_slot = slot;
-    }
-    return level_slot;
-}
-
-template <typename Book>
-const Level* find_level(const Book& book, const LevelPool& levels, const Price price) {
-    const LevelSlot slot = book.find(price);
-    return slot == NIL ? nullptr : &levels[slot];
-}
+// Bids are keyed by -price, so their keys run over the band negated: prices [lo, hi) become
+// keys (-hi, -lo], which is [1 - hi, 1 - lo)
+PriceBand bid_key_band(const PriceBand band) { return {.lo = 1 - band.hi, .hi = 1 - band.lo}; }
 
 }  // namespace
 
@@ -39,8 +24,7 @@ OrderBook::OrderBook(const std::uint32_t max_orders, const PriceBand band)
     : order_pool(max_orders + 1),
       level_pool(max_orders),
       band(band),
-      bid_levels(band, max_orders),
-      ask_levels(band, max_orders),
+      levels{PriceLevels(bid_key_band(band), max_orders), PriceLevels(band, max_orders)},
       max_orders(max_orders) {
     // Slot NIL can't be handed out
     assert(max_orders < NIL - 1);
@@ -113,17 +97,19 @@ Result OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQt
 }
 
 std::optional<Price> OrderBook::best_bid() const {
-    if (bid_levels.empty()) {
+    const PriceLevels& bids = levels_of(Side::Buy);
+    if (bids.empty()) {
         return std::nullopt;
     }
-    return bid_levels.best_price();
+    return key(Side::Buy, bids.best_price());
 }
 
 std::optional<Price> OrderBook::best_ask() const {
-    if (ask_levels.empty()) {
+    const PriceLevels& asks = levels_of(Side::Sell);
+    if (asks.empty()) {
         return std::nullopt;
     }
-    return ask_levels.best_price();
+    return key(Side::Sell, asks.best_price());
 }
 
 std::optional<Price> OrderBook::spread() const {
@@ -245,8 +231,15 @@ void OrderBook::unlink(const Slot slot) {
 }
 
 LevelSlot OrderBook::level_for(const Side side, const Price price) {
-    return side == Side::Buy ? find_or_add_level(bid_levels, level_pool, price)
-                             : find_or_add_level(ask_levels, level_pool, price);
+    auto [level_slot, inserted] = levels_of(side).try_emplace(key(side, price));
+    if (inserted) {
+        const LevelSlot slot = level_pool.acquire();
+        assert(slot != NIL && "level pool ran out: an emptied level wasn't released");
+        // A fresh level, because a free one still holds its free-list link in head
+        level_pool[slot] = Level{.price = price};
+        level_slot = slot;
+    }
+    return level_slot;
 }
 
 void OrderBook::erase_if_empty(const LevelSlot level_slot, const Side side) {
@@ -254,17 +247,17 @@ void OrderBook::erase_if_empty(const LevelSlot level_slot, const Side side) {
     if (level.head != NIL) {
         return;
     }
-    if (side == Side::Buy) {
-        bid_levels.erase(level.price);
-    } else {
-        ask_levels.erase(level.price);
-    }
+    levels_of(side).erase(key(side, level.price));
     level_pool.release(level_slot);
 }
 
 const Level* OrderBook::level_at(const Side side, const Price price) const {
-    return side == Side::Buy ? find_level(bid_levels, level_pool, price)
-                             : find_level(ask_levels, level_pool, price);
+    // No level lies outside the band, and checking first keeps key() from negating INT64_MIN
+    if (!band.contains(price)) {
+        return nullptr;
+    }
+    const LevelSlot slot = levels_of(side).find(key(side, price));
+    return slot == NIL ? nullptr : &level_pool[slot];
 }
 
 Result OrderBook::validate(const Order& order) {
@@ -274,29 +267,18 @@ Result OrderBook::validate(const Order& order) {
     return Result::Ok;
 }
 
-bool OrderBook::crosses(const Order& incoming, const Price price) {
-    if (incoming.type == OrderType::Market) {
-        return true;
-    }
-    return incoming.side == Side::Buy ? incoming.price >= price : incoming.price <= price;
-}
-
-template <typename Book>
-bool OrderBook::can_fill_from(const Book& book, const Order& incoming) const {
-    Qty total = 0;
-    book.for_each_from_best([&](const Price price, const LevelSlot level_slot) {
-        if (!crosses(incoming, price)) {
-            return false;
-        }
-        total += level_pool[level_slot].total;
-        return total < incoming.remaining;
-    });
-    return total >= incoming.remaining;
-}
-
 bool OrderBook::can_fill(const Order& incoming) const {
-    return incoming.side == Side::Buy ? can_fill_from(ask_levels, incoming)
-                                      : can_fill_from(bid_levels, incoming);
+    const Price limit = limit_key(incoming);
+    Qty total = 0;
+    levels_of(opposite(incoming.side))
+        .for_each_from_best([&](const Price maker_key, const LevelSlot level_slot) {
+            if (maker_key > limit) {
+                return false;
+            }
+            total += level_pool[level_slot].total;
+            return total < incoming.remaining;
+        });
+    return total >= incoming.remaining;
 }
 
 bool OrderBook::should_rest(const Order& order) {
