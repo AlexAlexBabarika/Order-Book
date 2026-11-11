@@ -64,6 +64,13 @@ OrderId rest(OrderBook& book, const Order& order) {
     return placed.id;
 }
 
+// A modify that mustn't trade
+Result modify(OrderBook& book, const OrderId id, const Price price, const Qty qty) {
+    return book.modify(id, price, qty, [](const Fill& fill) {
+        ADD_FAILURE() << "unexpected fill at " << fill.price << " for " << fill.qty;
+    });
+}
+
 TEST(OrderBook, EmptyBookHasNoOrders) {
     lob::OrderBook book;
     EXPECT_EQ(book.size(), 0u);
@@ -171,7 +178,7 @@ TEST(OrderBook, StaleIdDoesNotReachNewOrderInSameSlot) {
     EXPECT_NE(new_id, old_id);
     EXPECT_FALSE(book.contains(old_id));
     EXPECT_EQ(book.cancel(old_id), Result::UnknownId);
-    EXPECT_EQ(book.modify(old_id, 102, 1), Result::UnknownId);
+    EXPECT_EQ(modify(book, old_id, 102, 1), Result::UnknownId);
     EXPECT_TRUE(book.contains(new_id));
     EXPECT_EQ(book.orders_at(Side::Buy, 101), (std::vector<OrderId>{new_id}));
     EXPECT_EQ(book.level_qty(Side::Buy, 101), 3);
@@ -203,7 +210,7 @@ TEST(OrderBook, UnknownIdCancelAndModifyChangeNothing) {
                                   NO_ORDER}) {
         EXPECT_FALSE(book.contains(unknown)) << unknown;
         EXPECT_EQ(book.cancel(unknown), Result::UnknownId) << unknown;
-        EXPECT_EQ(book.modify(unknown, 101, 10), Result::UnknownId) << unknown;
+        EXPECT_EQ(modify(book, unknown, 101, 10), Result::UnknownId) << unknown;
     }
     EXPECT_EQ(book.size(), 1u);
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{id}));
@@ -212,25 +219,25 @@ TEST(OrderBook, UnknownIdCancelAndModifyChangeNothing) {
 }
 
 TEST_F(ThreeBidsAt100, LowerQtyAtSamePriceKeepsQueuePosition) {
-    EXPECT_EQ(book.modify(one, 100, 2), Result::Ok);
+    EXPECT_EQ(modify(book, one, 100, 2), Result::Ok);
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{one, two, three}));
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 10);
 }
 
 TEST_F(ThreeBidsAt100, UnchangedQtyAtSamePriceKeepsQueuePosition) {
-    book.modify(one, 100, 5);
+    modify(book, one, 100, 5);
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{one, two, three}));
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 13);
 }
 
 TEST_F(ThreeBidsAt100, HigherQtyMovesOrderToBackOfQueue) {
-    book.modify(one, 100, 9);
+    modify(book, one, 100, 9);
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{two, three, one}));
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 17);
 }
 
 TEST_F(ThreeBidsAt100, NewPriceMovesOrderToNewLevel) {
-    EXPECT_EQ(book.modify(two, 101, 7), Result::Ok);
+    EXPECT_EQ(modify(book, two, 101, 7), Result::Ok);
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{one, three}));
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 6);
     EXPECT_EQ(book.orders_at(Side::Buy, 101), (std::vector<OrderId>{two}));
@@ -240,7 +247,7 @@ TEST_F(ThreeBidsAt100, NewPriceMovesOrderToNewLevel) {
 TEST(OrderBook, NewPriceRemovesEmptiedLevel) {
     lob::OrderBook book;
     const OrderId id = rest(book, buy(100, 5));
-    book.modify(id, 99, 5);
+    modify(book, id, 99, 5);
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 0);
     EXPECT_EQ(book.orders_at(Side::Buy, 99), (std::vector<OrderId>{id}));
     EXPECT_EQ(book.best_bid(), 99);
@@ -248,8 +255,8 @@ TEST(OrderBook, NewPriceRemovesEmptiedLevel) {
 }
 
 TEST_F(ThreeBidsAt100, NonPositiveQtyModifyCancels) {
-    EXPECT_EQ(book.modify(two, 100, 0), Result::Ok);
-    EXPECT_EQ(book.modify(three, 100, -1), Result::Ok);
+    EXPECT_EQ(modify(book, two, 100, 0), Result::Ok);
+    EXPECT_EQ(modify(book, three, 100, -1), Result::Ok);
     EXPECT_FALSE(book.contains(two));
     EXPECT_FALSE(book.contains(three));
     EXPECT_EQ(book.orders_at(Side::Buy, 100), (std::vector<OrderId>{one}));
@@ -320,7 +327,7 @@ TEST(OrderBook, MovedBookKeepsWorking) {
     EXPECT_EQ(moved.cancel(first), Result::Ok);
     EXPECT_EQ(moved.orders_at(Side::Buy, 100), (std::vector<OrderId>{second}));
     EXPECT_EQ(moved.level_qty(Side::Buy, 100), 7);
-    EXPECT_EQ(moved.modify(second, 99, 7), Result::Ok);
+    EXPECT_EQ(modify(moved, second, 99, 7), Result::Ok);
     EXPECT_EQ(moved.best_bid(), 99);
 }
 
@@ -341,8 +348,8 @@ TEST(OrderBook, FullBookRejectsUntilASlotFrees) {
 TEST(OrderBook, ModifyOnFullBookKeepsItsSlot) {
     lob::OrderBook book(1);
     const OrderId id = rest(book, buy(100, 5));
-    EXPECT_EQ(book.modify(id, 101, 5), Result::Ok);
-    EXPECT_EQ(book.modify(id, 101, 9), Result::Ok);
+    EXPECT_EQ(modify(book, id, 101, 5), Result::Ok);
+    EXPECT_EQ(modify(book, id, 101, 9), Result::Ok);
     EXPECT_EQ(book.orders_at(Side::Buy, 101), (std::vector<OrderId>{id}));
     EXPECT_EQ(book.level_qty(Side::Buy, 101), 9);
     EXPECT_EQ(book.level_qty(Side::Buy, 100), 0);
@@ -409,7 +416,7 @@ TEST(OrderBook, MarketOrderIgnoresBand) {
 TEST(OrderBook, ModifyOutsideBandKeepsOrder) {
     lob::OrderBook book(16, BAND_100_200);
     const OrderId id = rest(book, buy(150, 5));
-    EXPECT_EQ(book.modify(id, 200, 3), Result::OutOfBand);
+    EXPECT_EQ(modify(book, id, 200, 3), Result::OutOfBand);
     EXPECT_EQ(book.orders_at(Side::Buy, 150), (std::vector<OrderId>{id}));
     EXPECT_EQ(book.level_qty(Side::Buy, 150), 5);
 }
@@ -450,7 +457,7 @@ TEST(OrderBook, BothSidesWorkAtBothBandEdges) {
 TEST(OrderBook, ModifyToZeroQtyCancelsWhateverThePrice) {
     lob::OrderBook book(16, BAND_100_200);
     const OrderId id = rest(book, buy(150, 5));
-    EXPECT_EQ(book.modify(id, 999, 0), Result::Ok);
+    EXPECT_EQ(modify(book, id, 999, 0), Result::Ok);
     EXPECT_FALSE(book.contains(id));
 }
 
@@ -491,11 +498,80 @@ TEST(OrderBook, ModifyReleasesEmptiedLevels) {
     lob::OrderBook book(4);
     const OrderId id = rest(book, buy(100, 5));
     for (Price price = 101; price <= 200; ++price) {
-        ASSERT_EQ(book.modify(id, price, 5), Result::Ok);
+        ASSERT_EQ(modify(book, id, price, 5), Result::Ok);
     }
     EXPECT_EQ(book.orders_at(Side::Buy, 200), (std::vector<OrderId>{id}));
     EXPECT_EQ(book.level_qty(Side::Buy, 199), 0);
     EXPECT_EQ(book.best_bid(), 200);
+}
+
+// A modify that crosses is a cancel and replace: the order trades under its own id, at the
+// makers' prices, best first, and what's left rests at its new price
+TEST(OrderBook, ModifyThatCrossesTrades) {
+    lob::OrderBook book;
+    const OrderId near = rest(book, sell(101, 2));
+    const OrderId far = rest(book, sell(102, 2));
+    const OrderId bid = rest(book, buy(100, 5));
+    std::vector<Fill> fills;
+    const auto on_fill = [&fills](const Fill& fill) { fills.push_back(fill); };
+
+    EXPECT_EQ(book.modify(bid, 102, 5, on_fill), Result::Ok);
+    EXPECT_EQ(fills, (std::vector<Fill>{
+                         {.maker = near, .taker = bid, .price = 101, .qty = 2},
+                         {.maker = far, .taker = bid, .price = 102, .qty = 2},
+                     }));
+    EXPECT_EQ(book.best_ask(), std::nullopt);
+    EXPECT_EQ(book.orders_at(Side::Buy, 102), (std::vector<OrderId>{bid}));
+    EXPECT_EQ(book.level_qty(Side::Buy, 102), 1);
+    EXPECT_EQ(book.level_qty(Side::Buy, 100), 0);
+    EXPECT_EQ(book.size(), 1u);
+}
+
+TEST(OrderBook, ModifyThatFillsCompletelyRemovesTheOrder) {
+    lob::OrderBook book;
+    const OrderId bid = rest(book, buy(100, 5));
+    const OrderId ask = rest(book, sell(102, 3));
+    std::vector<Fill> fills;
+    const auto on_fill = [&fills](const Fill& fill) { fills.push_back(fill); };
+
+    EXPECT_EQ(book.modify(ask, 99, 3, on_fill), Result::Ok);
+    EXPECT_EQ(fills,
+              (std::vector<Fill>{{.maker = bid, .taker = ask, .price = 100, .qty = 3}}));
+    EXPECT_FALSE(book.contains(ask));
+    EXPECT_EQ(book.cancel(ask), Result::UnknownId);
+    EXPECT_EQ(book.best_ask(), std::nullopt);
+    EXPECT_EQ(book.level_qty(Side::Buy, 100), 2);
+    EXPECT_EQ(book.size(), 1u);
+}
+
+TEST(OrderBook, ModifiedOrderKeepsItsTif) {
+    lob::OrderBook book;
+    rest(book, sell(101, 2));
+    const OrderId day = rest(book, buy(100, 5, Tif::Day));
+    std::size_t fills = 0;
+
+    EXPECT_EQ(book.modify(day, 101, 5, [&fills](const Fill&) { ++fills; }), Result::Ok);
+    EXPECT_EQ(fills, 1u);
+    EXPECT_EQ(book.level_qty(Side::Buy, 101), 3);
+    book.end_session();
+    EXPECT_FALSE(book.contains(day));
+}
+
+// The order gives up its place before it trades, so a full book doesn't stop it
+TEST(OrderBook, ModifyCanTradeOnAFullBook) {
+    lob::OrderBook book(2);
+    const OrderId ask = rest(book, sell(101, 5));
+    const OrderId bid = rest(book, buy(100, 5));
+    std::vector<Fill> fills;
+    const auto on_fill = [&fills](const Fill& fill) { fills.push_back(fill); };
+
+    EXPECT_EQ(book.modify(bid, 101, 5, on_fill), Result::Ok);
+    EXPECT_EQ(fills,
+              (std::vector<Fill>{{.maker = ask, .taker = bid, .price = 101, .qty = 5}}));
+    EXPECT_EQ(book.size(), 0u);
+    rest(book, buy(100, 1));
+    rest(book, sell(101, 1));
+    EXPECT_EQ(book.size(), 2u);
 }
 
 // Asks: ask1 (5) and ask2 (7) at 100, ask3 (4) at 101, ask4 (6) at 103

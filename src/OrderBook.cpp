@@ -56,44 +56,16 @@ Result OrderBook::cancel(const OrderId id) {
     return Result::Ok;
 }
 
-Result OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQty) {
-    const Slot slot = find(id);
-    if (slot == NIL) {
-        return Result::UnknownId;
+bool OrderBook::shrink_in_place(const Slot slot, const Price newPrice, const Qty newQty) {
+    OrderNode& node = order_pool[slot];
+    Level& level = level_pool[node.level];
+    if (newPrice != level.price || newQty > node.remaining) {
+        return false;
     }
-
-    if (newQty <= 0) {
-        erase_order(slot);
-        return Result::Ok;
-    }
-
-    if (!band.contains(newPrice)) {
-        return Result::OutOfBand;
-    }
-
-    OrderNode& resting = order_pool[slot];
-    const LevelSlot level_slot = resting.level;
-    Level& level = level_pool[level_slot];
-    const Qty filled = resting.original - resting.remaining;
-
-    if (newPrice == level.price && newQty <= resting.remaining) {
-        level.total -= resting.remaining - newQty;
-        resting.remaining = newQty;
-        resting.original = filled + newQty;
-        return Result::Ok;
-    }
-
-    unlink(slot);
-    resting.remaining = newQty;
-    resting.original = filled + newQty;
-    if (newPrice == level.price) {
-        link_back(level_slot, slot);
-    } else {
-        // Release before acquiring, so a full book can still move its order to a new price
-        erase_if_empty(level_slot, resting.side);
-        link_back(level_for(resting.side, newPrice), slot);
-    }
-    return Result::Ok;
+    level.total -= node.remaining - newQty;
+    node.original -= node.remaining - newQty;
+    node.remaining = newQty;
+    return true;
 }
 
 std::optional<Price> OrderBook::best_bid() const {
@@ -189,12 +161,18 @@ void OrderBook::rest(const Slot slot, const Order& order) {
     ++resting_orders;
 }
 
-void OrderBook::erase_order(const Slot slot) {
+// The level is released before a modify asks for its new one, so a full book can still move
+// an order to a new price
+void OrderBook::take_off_book(const Slot slot) {
     const OrderNode& node = order_pool[slot];
     unlink(slot);
     erase_if_empty(node.level, node.side);
-    close_slot(slot);
     --resting_orders;
+}
+
+void OrderBook::erase_order(const Slot slot) {
+    take_off_book(slot);
+    close_slot(slot);
 }
 
 void OrderBook::link_back(const LevelSlot level_slot, const Slot slot) {

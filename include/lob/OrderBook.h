@@ -42,7 +42,10 @@ class OrderBook {
     // Rests the order without matching it
     Placed add(const Order& order);
     Result cancel(OrderId id);
-    Result modify(OrderId id, Price newPrice, Qty newQty);
+    // Less at the same price keeps the order's place in its queue. Any other change is a
+    // cancel and replace under the same id
+    template <typename OnFill>
+    Result modify(OrderId id, Price newPrice, Qty newQty, OnFill&& on_fill);
     std::optional<Price> best_bid() const;
     std::optional<Price> best_ask() const;
     std::optional<Price> spread() const;
@@ -99,7 +102,11 @@ class OrderBook {
     Slot open_slot();
     void close_slot(Slot slot);
     void rest(Slot slot, const Order& order);
+    // Takes the order out of its level. It keeps its slot, and with it its id
+    void take_off_book(Slot slot);
     void erase_order(Slot slot);
+    // Shrinks the order where it stands, if the change allows it
+    bool shrink_in_place(Slot slot, Price newPrice, Qty newQty);
     void link_back(LevelSlot level, Slot slot);
     void unlink(Slot slot);
     LevelSlot level_for(Side side, Price price);
@@ -184,5 +191,42 @@ Placed OrderBook::submit(Order order, OnFill&& on_fill) {
     }
     rest(slot, order);
     return {.result = Result::Ok, .id = id};
+}
+
+template <typename OnFill>
+Result OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQty,
+                         OnFill&& on_fill) {
+    const Slot slot = find(id);
+    if (slot == NIL) {
+        return Result::UnknownId;
+    }
+    if (newQty <= 0) {
+        erase_order(slot);
+        return Result::Ok;
+    }
+    if (!band.contains(newPrice)) {
+        return Result::OutOfBand;
+    }
+    if (shrink_in_place(slot, newPrice, newQty)) {
+        return Result::Ok;
+    }
+
+    // Like a new submit, but the order keeps its slot and id, and what it filled before
+    const OrderNode& node = order_pool[slot];
+    Order order{.price = newPrice,
+                .original = node.original - node.remaining + newQty,
+                .remaining = newQty,
+                .side = node.side,
+                .tif = node.tif};
+    take_off_book(slot);
+    match(order, id, on_fill);
+    if (order.remaining == 0) {
+        close_slot(slot);
+        return Result::Ok;
+    }
+    // Only GTC and Day orders rest, so the rest of a resting order may rest again, and the
+    // book has room: this order's own place was freed above
+    rest(slot, order);
+    return Result::Ok;
 }
 }  // namespace lob

@@ -35,7 +35,7 @@ void apply(OrderBook& book, const Message& msg, OnFill& on_fill) {
             book.cancel(msg.id);
             return;
         case MsgType::Modify:
-            book.modify(msg.id, msg.new_price, msg.new_qty);
+            book.modify(msg.id, msg.new_price, msg.new_qty, on_fill);
             return;
     }
 }

@@ -91,7 +91,7 @@ class Generator {
                           .id = order.id,
                           .new_price = passive_price(order.side),
                           .new_qty = qty(rng)};
-        scratch.modify(msg.id, msg.new_price, msg.new_qty);
+        scratch.modify(msg.id, msg.new_price, msg.new_qty, [](const Fill&) {});
         return msg;
     }
 
