@@ -102,11 +102,33 @@ class OrderBook {
     Slot open_slot();
     void close_slot(Slot slot);
     void rest(Slot slot, const Order& order);
-    // Takes the order out of its level. It keeps its slot, and with it its id
-    void take_off_book(Slot slot);
+    // Takes the order out of its level. It keeps its slot, and with it its id. Forced inline:
+    // left to itself, clang kept it out of line, and cancel paid for extra register saves
+    // around the call (step 15)
+    [[gnu::always_inline]] void take_off_book(const Slot slot) {
+        unlink(slot);
+        erase_if_empty(order_pool[slot].level, order_pool[slot].side);
+        --resting_orders;
+    }
     void erase_order(Slot slot);
+
+    // The part of modify() that can't trade. It lives in the .cpp, so a modify costs the
+    // caller one call. If the new price crosses, it changes nothing and hands back the
+    // order's slot for trade_amended()
+    struct Amended {
+        Result result;
+        Slot crossing = NIL;
+    };
+    Amended amend(OrderId id, Price newPrice, Qty newQty);
     // Shrinks the order where it stands, if the change allows it
     bool shrink_in_place(Slot slot, Price newPrice, Qty newQty);
+    // The order as it stands after a modify. It keeps its side, its tif and what it filled
+    Order replacement(Slot slot, Price newPrice, Qty newQty) const;
+    // The cancel and replace of a modify that crosses. Not inlined, since it's rare and holds
+    // a copy of match()
+    template <typename OnFill>
+    [[gnu::noinline]] void trade_amended(Slot slot, Price newPrice, Qty newQty, OnFill& on_fill);
+
     void link_back(LevelSlot level, Slot slot);
     void unlink(Slot slot);
     LevelSlot level_for(Side side, Price price);
@@ -114,16 +136,23 @@ class OrderBook {
     const Level* level_at(const Side side, const Price price) const;
     static Result validate(const Order& order);
 
+    // Forced inline, since it's submit()'s inner loop. Once modify() called it too, the
+    // compiler stopped inlining it, and every submit paid a call (step 15)
     template <typename OnFill>
-    void match(Order& incoming, OrderId taker, OnFill& on_fill);
+    [[gnu::always_inline]] inline void match(Order& incoming, OrderId taker, OnFill& on_fill);
 
+    // Whether the order would trade with the best level on the other side
+    bool crosses(const Order& incoming) const {
+        const PriceLevels& book = levels_of(opposite(incoming.side));
+        return !book.empty() && book.best_price() <= limit_key(incoming);
+    }
     bool can_fill(const Order& incoming) const;
 
     static bool should_rest(const Order& order);
 };
 
 template <typename OnFill>
-void OrderBook::match(Order& incoming, const OrderId taker, OnFill& on_fill) {
+inline void OrderBook::match(Order& incoming, const OrderId taker, OnFill& on_fill) {
     PriceLevels& book = levels_of(opposite(incoming.side));
     const Price limit = limit_key(incoming);
     while (incoming.remaining > 0 && !book.empty()) {
@@ -196,37 +225,27 @@ Placed OrderBook::submit(Order order, OnFill&& on_fill) {
 template <typename OnFill>
 Result OrderBook::modify(const OrderId id, const Price newPrice, const Qty newQty,
                          OnFill&& on_fill) {
-    const Slot slot = find(id);
-    if (slot == NIL) {
-        return Result::UnknownId;
+    const Amended amended = amend(id, newPrice, newQty);
+    if (amended.crossing != NIL) {
+        trade_amended(amended.crossing, newPrice, newQty, on_fill);
     }
-    if (newQty <= 0) {
-        erase_order(slot);
-        return Result::Ok;
-    }
-    if (!band.contains(newPrice)) {
-        return Result::OutOfBand;
-    }
-    if (shrink_in_place(slot, newPrice, newQty)) {
-        return Result::Ok;
-    }
+    return amended.result;
+}
 
-    // Like a new submit, but the order keeps its slot and id, and what it filled before
-    const OrderNode& node = order_pool[slot];
-    Order order{.price = newPrice,
-                .original = node.original - node.remaining + newQty,
-                .remaining = newQty,
-                .side = node.side,
-                .tif = node.tif};
+// Like a new submit, but the order keeps its slot and id, and what it filled before
+template <typename OnFill>
+void OrderBook::trade_amended(const Slot slot, const Price newPrice, const Qty newQty,
+                              OnFill& on_fill) {
+    Order order = replacement(slot, newPrice, newQty);
+    // The order gives up its place before it trades, so a full book doesn't block it
     take_off_book(slot);
-    match(order, id, on_fill);
+    match(order, id_of(slot), on_fill);
     if (order.remaining == 0) {
         close_slot(slot);
-        return Result::Ok;
+        return;
     }
     // Only GTC and Day orders rest, so the rest of a resting order may rest again, and the
     // book has room: this order's own place was freed above
     rest(slot, order);
-    return Result::Ok;
 }
 }  // namespace lob

@@ -56,6 +56,42 @@ Result OrderBook::cancel(const OrderId id) {
     return Result::Ok;
 }
 
+OrderBook::Amended OrderBook::amend(const OrderId id, const Price newPrice, const Qty newQty) {
+    const Slot slot = find(id);
+    if (slot == NIL) {
+        return {.result = Result::UnknownId};
+    }
+    if (newQty <= 0) {
+        erase_order(slot);
+        return {.result = Result::Ok};
+    }
+    if (!band.contains(newPrice)) {
+        return {.result = Result::OutOfBand};
+    }
+    if (shrink_in_place(slot, newPrice, newQty)) {
+        return {.result = Result::Ok};
+    }
+
+    const Order order = replacement(slot, newPrice, newQty);
+    if (crosses(order)) {
+        return {.result = Result::Ok, .crossing = slot};
+    }
+    // Nothing to trade, so this is the whole cancel and replace. Taking the order off first
+    // releases its level before rest() asks for one, so a full book can still move it
+    take_off_book(slot);
+    rest(slot, order);
+    return {.result = Result::Ok};
+}
+
+Order OrderBook::replacement(const Slot slot, const Price newPrice, const Qty newQty) const {
+    const OrderNode& node = order_pool[slot];
+    return {.price = newPrice,
+            .original = node.original - node.remaining + newQty,
+            .remaining = newQty,
+            .side = node.side,
+            .tif = node.tif};
+}
+
 bool OrderBook::shrink_in_place(const Slot slot, const Price newPrice, const Qty newQty) {
     OrderNode& node = order_pool[slot];
     Level& level = level_pool[node.level];
@@ -159,15 +195,6 @@ void OrderBook::rest(const Slot slot, const Order& order) {
     node.tif = order.tif;
     link_back(level_for(order.side, order.price), slot);
     ++resting_orders;
-}
-
-// The level is released before a modify asks for its new one, so a full book can still move
-// an order to a new price
-void OrderBook::take_off_book(const Slot slot) {
-    const OrderNode& node = order_pool[slot];
-    unlink(slot);
-    erase_if_empty(node.level, node.side);
-    --resting_orders;
 }
 
 void OrderBook::erase_order(const Slot slot) {
