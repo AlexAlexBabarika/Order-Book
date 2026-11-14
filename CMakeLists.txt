@@ -24,6 +24,25 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest benchmark)
 
+# Link-time optimisation, so code in OrderBook.cpp can be inlined into the header templates
+# (step 16). Set here, after GoogleTest and Google Benchmark are made, so only this project's
+# targets get it and the harness stays as it was. CMake's default for Clang is THIN
+set(LOB_LTO OFF CACHE STRING "Link-time optimisation of this project's targets: OFF, THIN or FULL")
+set_property(CACHE LOB_LTO PROPERTY STRINGS OFF THIN FULL)
+if(NOT LOB_LTO STREQUAL "OFF")
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT lob_lto_supported OUTPUT lob_lto_error LANGUAGES CXX)
+  if(NOT lob_lto_supported)
+    message(FATAL_ERROR "LOB_LTO=${LOB_LTO}, but this toolchain can't do LTO: ${lob_lto_error}")
+  endif()
+  if(LOB_LTO STREQUAL "FULL" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(CMAKE_CXX_COMPILE_OPTIONS_IPO -flto=full)
+  elseif(NOT LOB_LTO STREQUAL "THIN")
+    message(FATAL_ERROR "LOB_LTO must be OFF, THIN or FULL (FULL needs Clang), not ${LOB_LTO}")
+  endif()
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+endif()
+
 add_library(lob src/OrderBook.cpp src/lob_version.cpp src/CoreTypes.cpp)
 target_compile_features(lob PUBLIC cxx_std_20)
 target_include_directories(lob PUBLIC include)
@@ -54,4 +73,14 @@ add_test(NAME NoAllocationAfterWarmUp COMMAND lob_no_alloc_test)
 # Only the release preset gives meaningful numbers
 add_executable(lob_bench bench/order_book_bench.cpp)
 target_link_libraries(lob_bench PRIVATE lob_workload benchmark::benchmark_main)
+
+# With LTO, Apple's linker compiles the bitcode into temporary objects and deletes them after
+# the link, and their debug info goes with them, so dsymutil and atos can't see the book's
+# code. Keep them, one path per executable: ThinLTO writes a folder of objects there
+if(APPLE AND NOT LOB_LTO STREQUAL "OFF")
+  foreach(exe lob_app lob_tests lob_no_alloc_test lob_bench)
+    target_link_options(${exe} PRIVATE
+      "LINKER:-object_path_lto,${CMAKE_CURRENT_BINARY_DIR}/lto-${LOB_LTO}-${exe}")
+  endforeach()
+endif()
 
