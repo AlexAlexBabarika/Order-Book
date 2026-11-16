@@ -50,6 +50,7 @@ class OrderBook {
     std::optional<Price> best_ask() const;
     std::optional<Price> spread() const;
     void end_session();
+    Result move_band(Price lo);
 
     std::size_t size() const;
     bool contains(OrderId id) const;

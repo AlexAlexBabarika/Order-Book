@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 #include "lob/CoreTypes.h"
 
@@ -137,6 +138,26 @@ void OrderBook::end_session() {
             erase_order(slot);
         }
     }
+}
+
+// Both sides are checked before either moves, so a move that fails changes nothing
+Result OrderBook::move_band(const Price lo) {
+    constexpr Price MIN = std::numeric_limits<Price>::min();
+    constexpr Price MAX = std::numeric_limits<Price>::max();
+    const Price width = band.hi - band.lo;
+    // hi is lo + width, and the bids' keys run up to 1 - lo, so both have to fit in a Price
+    if (lo < MIN + 2 || lo > MAX - width) {
+        return Result::OutOfBand;
+    }
+    const PriceBand moved{.lo = lo, .hi = lo + width};
+    const PriceBand bid_keys = bid_key_band(moved);
+    if (!levels_of(Side::Buy).fits(bid_keys) || !levels_of(Side::Sell).fits(moved)) {
+        return Result::OutOfBand;
+    }
+    levels_of(Side::Buy).rebase(bid_keys);
+    levels_of(Side::Sell).rebase(moved);
+    band = moved;
+    return Result::Ok;
 }
 
 std::size_t OrderBook::size() const { return resting_orders; }

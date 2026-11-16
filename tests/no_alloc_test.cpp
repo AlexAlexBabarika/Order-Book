@@ -78,4 +78,21 @@ TEST(PriceLevels, NoAllocationAfterConstruction) {
     EXPECT_EQ(allocations_while_churning(ladder, LEVELS), 0u);
     EXPECT_EQ(allocations_while_churning(array, LEVELS), 0u);
 }
+
+// The array moves its slots within the vector it already has
+TEST(OrderBook, MovingTheBandDoesNotAllocate) {
+    OrderBook book(16, {.lo = 100, .hi = 200});
+    book.add({.price = 150, .original = 5, .side = Side::Buy, .tif = Tif::Gtc});
+    book.add({.price = 160, .original = 5, .side = Side::Sell, .tif = Tif::Gtc});
+    // Checked after counting, since a failed EXPECT allocates its message
+    const std::size_t before = g_allocs;
+    const Result up = book.move_band(120);
+    const Result down = book.move_band(80);
+    const Result too_far = book.move_band(5000);
+    const std::size_t allocs = g_allocs - before;
+    EXPECT_EQ(up, Result::Ok);
+    EXPECT_EQ(down, Result::Ok);
+    EXPECT_EQ(too_far, Result::OutOfBand);
+    EXPECT_EQ(allocs, 0u);
+}
 }  // namespace

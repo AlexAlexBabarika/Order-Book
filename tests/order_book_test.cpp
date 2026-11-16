@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <ostream>
 #include <type_traits>
@@ -452,6 +453,170 @@ TEST(OrderBook, BothSidesWorkAtBothBandEdges) {
                      }));
     EXPECT_EQ(book.best_ask(), std::nullopt);
     EXPECT_EQ(book.size(), 0u);
+}
+
+// move_band() keeps the width, so [100, 200) moved to 150 is [150, 250)
+TEST(OrderBook, MovedBandTakesItsNewPrices) {
+    lob::OrderBook book(16, BAND_100_200);
+    EXPECT_EQ(book.move_band(150), Result::Ok);
+    EXPECT_EQ(book.add(buy(149, 5)), (Placed{.result = Result::OutOfBand}));
+    EXPECT_EQ(book.add(sell(250, 5)), (Placed{.result = Result::OutOfBand}));
+    EXPECT_EQ(book.add(buy(150, 5)).result, Result::Ok);
+    EXPECT_EQ(book.add(sell(249, 5)).result, Result::Ok);
+    EXPECT_EQ(book.best_bid(), 150);
+    EXPECT_EQ(book.best_ask(), 249);
+}
+
+// Bids are kept under -price, so when the band moves up their array moves the other way
+TEST(OrderBook, RestingOrdersKeepTheirPlacesWhenTheBandMovesUp) {
+    lob::OrderBook book(16, BAND_100_200);
+    const OrderId low_bid = rest(book, buy(160, 2));
+    const OrderId first_bid = rest(book, buy(170, 3));
+    const OrderId second_bid = rest(book, buy(170, 4));
+    const OrderId low_ask = rest(book, sell(180, 5));
+    const OrderId high_ask = rest(book, sell(190, 6));
+
+    ASSERT_EQ(book.move_band(150), Result::Ok);
+    EXPECT_EQ(book.best_bid(), 170);
+    EXPECT_EQ(book.best_ask(), 180);
+    EXPECT_EQ(book.orders_at(Side::Buy, 170), (std::vector<OrderId>{first_bid, second_bid}));
+    EXPECT_EQ(book.level_qty(Side::Buy, 160), 2);
+    EXPECT_EQ(book.level_qty(Side::Sell, 190), 6);
+    // Only in the new band
+    const OrderId new_ask = rest(book, sell(240, 7));
+
+    std::vector<Fill> fills;
+    const auto on_fill = [&fills](const Fill& fill) { fills.push_back(fill); };
+    const OrderId seller = book.submit(sell(150, 9, Tif::Ioc), on_fill).id;
+    const OrderId buyer = book.submit(buy(240, 18, Tif::Ioc), on_fill).id;
+    EXPECT_EQ(fills, (std::vector<Fill>{
+                         {.maker = first_bid, .taker = seller, .price = 170, .qty = 3},
+                         {.maker = second_bid, .taker = seller, .price = 170, .qty = 4},
+                         {.maker = low_bid, .taker = seller, .price = 160, .qty = 2},
+                         {.maker = low_ask, .taker = buyer, .price = 180, .qty = 5},
+                         {.maker = high_ask, .taker = buyer, .price = 190, .qty = 6},
+                         {.maker = new_ask, .taker = buyer, .price = 240, .qty = 7},
+                     }));
+    EXPECT_EQ(book.size(), 0u);
+}
+
+TEST(OrderBook, RestingOrdersKeepTheirPlacesWhenTheBandMovesDown) {
+    lob::OrderBook book(16, BAND_100_200);
+    const OrderId low_bid = rest(book, buy(110, 2));
+    const OrderId high_bid = rest(book, buy(120, 3));
+    const OrderId low_ask = rest(book, sell(130, 4));
+    const OrderId high_ask = rest(book, sell(140, 5));
+
+    ASSERT_EQ(book.move_band(50), Result::Ok);
+    EXPECT_EQ(book.best_bid(), 120);
+    EXPECT_EQ(book.best_ask(), 130);
+    EXPECT_EQ(book.orders_at(Side::Sell, 140), (std::vector<OrderId>{high_ask}));
+    EXPECT_EQ(book.level_qty(Side::Buy, 110), 2);
+    // Only in the new band
+    const OrderId new_bid = rest(book, buy(60, 6));
+
+    std::vector<Fill> fills;
+    const auto on_fill = [&fills](const Fill& fill) { fills.push_back(fill); };
+    const OrderId seller = book.submit(sell(60, 11, Tif::Ioc), on_fill).id;
+    const OrderId buyer = book.submit(buy(140, 9, Tif::Ioc), on_fill).id;
+    EXPECT_EQ(fills, (std::vector<Fill>{
+                         {.maker = high_bid, .taker = seller, .price = 120, .qty = 3},
+                         {.maker = low_bid, .taker = seller, .price = 110, .qty = 2},
+                         {.maker = new_bid, .taker = seller, .price = 60, .qty = 6},
+                         {.maker = low_ask, .taker = buyer, .price = 130, .qty = 4},
+                         {.maker = high_ask, .taker = buyer, .price = 140, .qty = 5},
+                     }));
+    EXPECT_EQ(book.size(), 0u);
+}
+
+// A move that would leave a resting order outside the band changes nothing
+TEST(OrderBook, MoveThatWouldStrandABidFails) {
+    lob::OrderBook book(16, BAND_100_200);
+    const OrderId bid = rest(book, buy(120, 5));
+    EXPECT_EQ(book.move_band(121), Result::OutOfBand);
+    EXPECT_EQ(book.orders_at(Side::Buy, 120), (std::vector<OrderId>{bid}));
+    EXPECT_EQ(book.add(buy(100, 5)).result, Result::Ok);
+    EXPECT_EQ(book.add(sell(200, 5)), (Placed{.result = Result::OutOfBand}));
+}
+
+TEST(OrderBook, MoveThatWouldStrandAnAskFails) {
+    lob::OrderBook book(16, BAND_100_200);
+    const OrderId ask = rest(book, sell(180, 5));
+    EXPECT_EQ(book.move_band(79), Result::OutOfBand);
+    EXPECT_EQ(book.orders_at(Side::Sell, 180), (std::vector<OrderId>{ask}));
+    EXPECT_EQ(book.add(sell(199, 5)).result, Result::Ok);
+    EXPECT_EQ(book.add(buy(99, 5)), (Placed{.result = Result::OutOfBand}));
+}
+
+TEST(OrderBook, MoveFarAwayFailsWhileOrdersRest) {
+    lob::OrderBook book(16, BAND_100_200);
+    const OrderId bid = rest(book, buy(120, 5));
+    const OrderId ask = rest(book, sell(180, 5));
+    EXPECT_EQ(book.move_band(1'000'000), Result::OutOfBand);
+    EXPECT_EQ(book.move_band(-1'000'000), Result::OutOfBand);
+    EXPECT_EQ(book.orders_at(Side::Buy, 120), (std::vector<OrderId>{bid}));
+    EXPECT_EQ(book.orders_at(Side::Sell, 180), (std::vector<OrderId>{ask}));
+}
+
+// The bids would fit [90, 190) but the ask at 199 wouldn't. If the bids moved before the asks
+// were checked, they'd no longer take 190-199, which the band still allows
+TEST(OrderBook, FailedMoveLeavesBothSidesAlone) {
+    lob::OrderBook book(16, BAND_100_200);
+    const OrderId bid = rest(book, buy(150, 5));
+    rest(book, sell(199, 5));
+    EXPECT_EQ(book.move_band(90), Result::OutOfBand);
+    EXPECT_EQ(book.orders_at(Side::Buy, 150), (std::vector<OrderId>{bid}));
+    const OrderId high_bid = rest(book, buy(195, 5));
+    EXPECT_EQ(book.best_bid(), 195);
+    EXPECT_EQ(book.orders_at(Side::Buy, 195), (std::vector<OrderId>{high_bid}));
+}
+
+// The band includes lo and excludes hi, so an order may sit on lo or on hi - 1
+TEST(OrderBook, OrdersOnTheNewBandEdgesMayStay) {
+    lob::OrderBook book(16, BAND_100_200);
+    rest(book, buy(150, 5));
+    rest(book, sell(199, 5));
+    EXPECT_EQ(book.move_band(151), Result::OutOfBand);
+    EXPECT_EQ(book.move_band(99), Result::OutOfBand);
+    EXPECT_EQ(book.move_band(150), Result::Ok);
+    EXPECT_EQ(book.move_band(100), Result::Ok);
+    EXPECT_EQ(book.best_bid(), 150);
+    EXPECT_EQ(book.best_ask(), 199);
+}
+
+TEST(OrderBook, EmptyBookMovesAnyDistance) {
+    lob::OrderBook book(16, BAND_100_200);
+    book.cancel(rest(book, buy(150, 5)));
+    EXPECT_EQ(book.move_band(1'000'000), Result::Ok);
+    EXPECT_EQ(book.add(buy(150, 5)), (Placed{.result = Result::OutOfBand}));
+    rest(book, buy(1'000'050, 5));
+    rest(book, sell(1'000'060, 5));
+    EXPECT_EQ(book.spread(), 10);
+}
+
+// The band, and the bids' band of keys -price, have to fit in a Price. The lowest lo is
+// min + 2, since the bids' band ends at 1 - lo
+TEST(OrderBook, BandMustFitInAPrice) {
+    constexpr Price MIN = std::numeric_limits<Price>::min();
+    constexpr Price MAX = std::numeric_limits<Price>::max();
+    lob::OrderBook book(16, BAND_100_200);
+    EXPECT_EQ(book.move_band(MAX - 99), Result::OutOfBand);
+    EXPECT_EQ(book.move_band(MIN + 1), Result::OutOfBand);
+    EXPECT_EQ(book.add(buy(100, 5)).result, Result::Ok);
+    EXPECT_EQ(book.add(sell(200, 5)), (Placed{.result = Result::OutOfBand}));
+    book.cancel(book.orders_at(Side::Buy, 100).front());
+
+    ASSERT_EQ(book.move_band(MAX - 100), Result::Ok);
+    const OrderId top_bid = rest(book, buy(MAX - 2, 5));
+    const OrderId top_ask = rest(book, sell(MAX - 1, 5));
+    EXPECT_EQ(book.spread(), 1);
+    book.cancel(top_bid);
+    book.cancel(top_ask);
+
+    ASSERT_EQ(book.move_band(MIN + 2), Result::Ok);
+    rest(book, buy(MIN + 2, 5));
+    rest(book, sell(MIN + 3, 5));
+    EXPECT_EQ(book.spread(), 1);
 }
 
 TEST(OrderBook, ModifyToZeroQtyCancelsWhateverThePrice) {

@@ -1,6 +1,7 @@
 #pragma once
 #include <lob/CoreTypes.h>
 
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <utility>
@@ -59,8 +60,59 @@ class PriceArray {
         }
     }
 
+    // Whether every level would lie inside band, which is as wide as this array
+    bool fits(const PriceBand band) const {
+        assert(band.hi - band.lo == width());
+        if (count_ == 0) {
+            return true;
+        }
+        if (!overlaps(band)) {
+            return false;
+        }
+        // Only the slots at the end the band moves away from drop out
+        const Price shift = band.lo - base_;
+        const Price from = shift > 0 ? 0 : width() + shift;
+        const Price to = shift > 0 ? shift : width();
+        for (Price i = from; i < to; ++i) {
+            if (at(i) != NIL) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Puts the array under band, with every level still at its price. Only call it when
+    // fits(band). The slots move within the vector, so it doesn't allocate
+    void rebase(const PriceBand band) {
+        assert(fits(band));
+        if (count_ == 0) {
+            base_ = band.lo;
+            return;
+        }
+        // fits() means the bands overlap, so the shift is less than the width
+        const Price shift = band.lo - base_;
+        const auto n = static_cast<std::ptrdiff_t>(shift);
+        if (shift > 0) {
+            // The band moves up, so each slot moves to a lower index
+            std::copy(slots_.begin() + n, slots_.end(), slots_.begin());
+            std::fill(slots_.end() - n, slots_.end(), NIL);
+        } else if (shift < 0) {
+            std::copy_backward(slots_.begin(), slots_.end() + n, slots_.end());
+            std::fill(slots_.begin(), slots_.begin() - n, NIL);
+        }
+        base_ = band.lo;
+        best_ -= shift;
+    }
+
    private:
     static constexpr Price WORSE = Better{}(Price{1}, Price{0}) ? -1 : 1;
+
+    Price width() const { return static_cast<Price>(slots_.size()); }
+
+    // Compares edges rather than subtracting bases, which could overflow for bands far apart
+    bool overlaps(const PriceBand band) const {
+        return band.lo < base_ + width() && base_ < band.hi;
+    }
 
     LevelSlot at(const Price i) const { return slots_[static_cast<std::size_t>(i)]; }
 

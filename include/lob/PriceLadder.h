@@ -62,6 +62,13 @@ class PriceLadder {
         slots_.erase(slots_.begin() + static_cast<std::ptrdiff_t>(i - 1));
     }
 
+    // The ladder has no band of its own, so fits() only checks its best and worst prices,
+    // and rebase() has nothing to move
+    bool fits(const PriceBand band) const {
+        return prices_.empty() || (band.contains(prices_.front()) && band.contains(prices_.back()));
+    }
+    void rebase(const PriceBand) {}
+
    private:
     std::size_t past_better(const Price price) const {
         std::size_t i = prices_.size();

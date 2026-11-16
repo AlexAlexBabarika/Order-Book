@@ -228,4 +228,61 @@ TYPED_TEST(PriceLevels, WalkStopsWhenVisitSaysSo) {
     EXPECT_EQ(visited, (std::vector<Price>{103, 102}));
 }
 
+// fits() asks whether every level would lie inside a band as wide as BAND
+TYPED_TEST(PriceLevels, FitsOnlyIfEveryLevelStaysInside) {
+    add(this->asks, 100, 0);
+    add(this->asks, 110, 1);
+    EXPECT_TRUE(this->asks.fits({.lo = 100, .hi = 1100}));
+    EXPECT_FALSE(this->asks.fits({.lo = 101, .hi = 1101}));
+    EXPECT_TRUE(this->asks.fits({.lo = -889, .hi = 111}));
+    EXPECT_FALSE(this->asks.fits({.lo = -890, .hi = 110}));
+}
+
+// A band that doesn't overlap this one can't hold the levels, and the array mustn't scan
+// past its ends to find that out
+TYPED_TEST(PriceLevels, BandFarAwayDoesNotFit) {
+    add(this->asks, 100, 0);
+    EXPECT_FALSE(this->asks.fits({.lo = 2000, .hi = 3000}));
+    EXPECT_FALSE(this->asks.fits({.lo = -3000, .hi = -2000}));
+}
+
+TYPED_TEST(PriceLevels, EmptySideFitsAnyBand) {
+    add(this->bids, 100, 0);
+    this->bids.pop_best();
+    ASSERT_TRUE(this->bids.fits({.lo = 5000, .hi = 6000}));
+    this->bids.rebase({.lo = 5000, .hi = 6000});
+    add(this->bids, 5500, 1);
+    add(this->bids, 5999, 2);
+    EXPECT_EQ(best_first(this->bids), (std::vector<Price>{5999, 5500}));
+}
+
+// The array moves its slots under the new base, and the slots overlap, so each direction
+// copies its own way. The level at 100 ends up in the array's first slot
+TYPED_TEST(PriceLevels, RebaseUpKeepsEachLevelAtItsPrice) {
+    add_with_gaps(this->bids);
+    this->bids.rebase({.lo = 100, .hi = 1100});
+    EXPECT_EQ(best_first(this->bids), (std::vector<Price>{110, 105, 100}));
+    EXPECT_EQ(this->bids.find(105), 1u);
+    EXPECT_EQ(this->bids.best_slot(), 2u);
+    add(this->bids, 1099, 3);
+    EXPECT_EQ(this->bids.best_price(), 1099);
+    this->bids.pop_best();
+    this->bids.pop_best();
+    EXPECT_EQ(this->bids.best_price(), 105);
+}
+
+// The level at 110 ends up in the array's last slot
+TYPED_TEST(PriceLevels, RebaseDownKeepsEachLevelAtItsPrice) {
+    add_with_gaps(this->asks);
+    this->asks.rebase({.lo = -889, .hi = 111});
+    EXPECT_EQ(best_first(this->asks), (std::vector<Price>{100, 105, 110}));
+    EXPECT_EQ(this->asks.find(110), 2u);
+    EXPECT_EQ(this->asks.best_slot(), 0u);
+    add(this->asks, -889, 3);
+    EXPECT_EQ(this->asks.best_price(), -889);
+    this->asks.pop_best();
+    this->asks.pop_best();
+    EXPECT_EQ(this->asks.best_price(), 105);
+}
+
 }  // namespace
