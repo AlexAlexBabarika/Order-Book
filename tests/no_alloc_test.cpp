@@ -7,6 +7,7 @@
 #include <new>
 #include <vector>
 
+#include "FeedBook.h"
 #include "Workload.h"
 #include "lob/PriceArray.h"
 #include "lob/PriceLadder.h"
@@ -94,5 +95,41 @@ TEST(OrderBook, MovingTheBandDoesNotAllocate) {
     EXPECT_EQ(down, Result::Ok);
     EXPECT_EQ(too_far, Result::OutOfBand);
     EXPECT_EQ(allocs, 0u);
+}
+
+// The index from the feed's ids to the book's is reserved up front
+TEST(FeedBook, NoAllocationAfterConstruction) {
+    constexpr std::uint32_t ORDERS = 1000;
+    feed::FeedBook book(ORDERS, {.lo = 0, .hi = 1000}, 100);
+    const std::size_t before = g_allocs;
+    for (int round = 0; round < 3; ++round) {
+        // One too many, so the last add is turned away by a full book
+        for (std::uint64_t id = 0; id <= ORDERS; ++id) {
+            book.apply({.id = id,
+                        .size = 10,
+                        .price = static_cast<Price>(id % 500) * 100,
+                        .type = feed::EventType::Add,
+                        .side = Side::Buy});
+        }
+        for (std::uint64_t id = 0; id < ORDERS; ++id) {
+            const auto type = id % 2 == 0 ? feed::EventType::Execute : feed::EventType::Delete;
+            book.apply({.id = id,
+                        .size = 4,
+                        .price = static_cast<Price>(id % 500) * 100,
+                        .type = type,
+                        .side = Side::Buy});
+            book.apply({.id = id,
+                        .size = 6,
+                        .price = static_cast<Price>(id % 500) * 100,
+                        .type = feed::EventType::Execute,
+                        .side = Side::Buy});
+        }
+    }
+    const std::size_t allocs = g_allocs - before;
+    const std::size_t resting = book.book().size();
+    const std::size_t rejected = book.stats().rejected;
+    EXPECT_EQ(allocs, 0u);
+    EXPECT_EQ(resting, 0u);
+    EXPECT_EQ(rejected, 3u);
 }
 }  // namespace

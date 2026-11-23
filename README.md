@@ -51,8 +51,8 @@ workload after warm-up, and moving the band, allocate nothing.
   prices outside the band return `OutOfBand`. Nothing moves the band automatically.
 - `add()` rests an order without matching it, so it can leave the book crossed. Use
   `submit()`.
-- The book assigns ids, so replaying an external feed with its own ids would need a hash
-  index again.
+- The book assigns ids, so a feed with its own ids needs an index from one to the other.
+  `feed/` keeps one outside the book: see "Replaying a LOBSTER file".
 - The 32-bit generation wraps after 2^31 orders through one slot.
 
 ## Building
@@ -83,8 +83,46 @@ include/lob/   public headers: OrderBook, CoreTypes, Pool, PriceArray, PriceLadd
 src/           OrderBook.cpp and helpers
 tests/         behaviour tests, typed tests over both price structures, allocation tests
 bench/         workload generator and the replay benchmark
-app/           a placeholder executable
+feed/          LOBSTER file reader, a book built from a feed, and a checker
+app/           lob_app, which replays a LOBSTER file
 ```
+
+## Replaying a LOBSTER file
+
+`lob_app` replays a [LOBSTER](https://lobsterdata.com) message file, checks the book against
+the matching orderbook file after every event, and times the replay:
+
+```sh
+./build/release/lob_app AMZN_2012-06-21_34200000_57600000_message_10.csv \
+                        AMZN_2012-06-21_34200000_57600000_orderbook_10.csv
+```
+
+```
+269748 events: 131954 adds, 2917 reductions, 123458 deletions, 8974 executions, 2445 other
+checked 269748 rows, 5342751 levels (12761 synced to the file): 0 mismatches
+applied 267303, ignored 2444, unknown id 0, rejected 0; 437 orders resting at the end
+replay: 18.3 ns per event (median of 5 runs, best 18.2)
+```
+
+It exits with 1 if the book ever differs from the file. The orderbook file is optional, and
+no data is in the repo.
+
+- **A feed is already matched.** `FeedBook` rests adds with `add()` and takes executions off
+  the order the feed names, so this replay exercises `add`, `cancel` and the in-place
+  `modify`, not `submit` or matching.
+- **The id index is back.** `FeedBook` maps the feed's order ids to the book's with
+  `ankerl::unordered_dense`, reserved up front, so the replay still allocates nothing. The
+  18 ns includes it, so it isn't comparable with the 10.9 ns of the generated workload,
+  whose ids are the book's own.
+- **A message file only covers the levels its orderbook file shows.** Orders from before
+  09:30 are never named, and a level that drops out of view changes with no event. The
+  checker takes the file's quantity for a price the previous row didn't show, as one
+  stand-in order, and compares every price the previous row did show.
+- **The timed runs don't check**, so they only start from the file's first row. Levels that
+  change out of view are then never corrected: on the AMZN sample 2.5% of events name
+  orders the book doesn't have, and about 8,300 orders are left resting instead of 437.
+- Prices are taken as whole cents, in a band 65,536 cents wide around the first order.
+  Anything else is counted as rejected, or skipped by the checker.
 
 ## Benchmark
 

@@ -22,7 +22,15 @@ FetchContent_Declare(
   GIT_SHALLOW TRUE
   GIT_TAG        v1.9.5
 )
-FetchContent_MakeAvailable(googletest benchmark)
+# Only the feed replay uses it, for the index from a feed's order ids to the book's
+FetchContent_Declare(
+  unordered_dense
+  GIT_REPOSITORY https://github.com/martinus/unordered_dense.git
+  GIT_SHALLOW TRUE
+  GIT_TAG        v5.3.2
+  SYSTEM
+)
+FetchContent_MakeAvailable(googletest benchmark unordered_dense)
 
 # Link-time optimisation, so code in OrderBook.cpp can be inlined into the header templates
 # (step 16). Set here, after GoogleTest and Google Benchmark are made, so only this project's
@@ -56,18 +64,23 @@ add_library(lob_workload STATIC bench/Workload.cpp)
 target_include_directories(lob_workload PUBLIC bench)
 target_link_libraries(lob_workload PUBLIC lob)
 
-add_executable(lob_app app/main.cpp)
-target_link_libraries(lob_app PRIVATE lob)
+add_library(lob_feed STATIC feed/Lobster.cpp feed/FeedBook.cpp feed/Checker.cpp)
+target_include_directories(lob_feed PUBLIC feed)
+target_link_libraries(lob_feed PUBLIC lob unordered_dense::unordered_dense)
 
-add_executable(lob_tests tests/order_book_test.cpp tests/ladder_test.cpp tests/workload_test.cpp)
-target_link_libraries(lob_tests PRIVATE lob_workload GTest::gtest_main)
+add_executable(lob_app app/main.cpp)
+target_link_libraries(lob_app PRIVATE lob_feed)
+
+add_executable(lob_tests tests/order_book_test.cpp tests/ladder_test.cpp tests/workload_test.cpp
+  tests/feed_test.cpp)
+target_link_libraries(lob_tests PRIVATE lob_workload lob_feed GTest::gtest_main)
 
 include(GoogleTest)
 gtest_discover_tests(lob_tests)
 
 # Its own executable, because it replaces the global operator new
 add_executable(lob_no_alloc_test tests/no_alloc_test.cpp)
-target_link_libraries(lob_no_alloc_test PRIVATE lob_workload GTest::gtest_main)
+target_link_libraries(lob_no_alloc_test PRIVATE lob_workload lob_feed GTest::gtest_main)
 add_test(NAME NoAllocationAfterWarmUp COMMAND lob_no_alloc_test)
 
 # Only the release preset gives meaningful numbers
