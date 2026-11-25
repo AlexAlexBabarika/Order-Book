@@ -3,8 +3,10 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "FeedBook.h"
@@ -21,6 +23,20 @@ struct Mismatch {
     Qty actual;
 };
 
+struct Correction {
+    std::size_t row;  // counted from 0. It follows the event on that line of the message file
+    Side side;
+    Price price;          // in the feed's units
+    Qty qty;              // what the level holds afterwards, as one stand-in
+    std::size_t dropped;  // how many of Corrections::dropped it takes out first
+};
+
+struct Corrections {
+    std::vector<Correction> levels;
+    // The FeedBook's keys for the orders the levels took out, in the order they use them
+    std::vector<std::uint64_t> dropped;
+};
+
 // Checks a FeedBook against the rows of an orderbook file, one row after each event.
 //
 // A message file only has the events inside the levels its orderbook file shows. Orders from
@@ -30,7 +46,9 @@ struct Mismatch {
 // checked, since every change to it since then was an event
 class Checker {
    public:
-    explicit Checker(FeedBook& book) : book_(book) {}
+    // The changes it makes to the book are added to corrections, if given
+    explicit Checker(FeedBook& book, Corrections* corrections = nullptr)
+        : book_(book), corrections_(corrections) {}
 
     void check(const BookRow& row);
 
@@ -51,6 +69,7 @@ class Checker {
     void sync(Side side, Price feed_price, Qty qty);
 
     FeedBook& book_;
+    Corrections* corrections_;
     // The furthest price the last row showed on each side, as a key that grows away from the
     // market: the price for asks, and its negative for bids
     std::array<Price, 2> shown_{NOTHING_SHOWN, NOTHING_SHOWN};
@@ -60,5 +79,12 @@ class Checker {
     std::size_t mismatches_ = 0;
     std::optional<Mismatch> first_;
 };
+
+// Applies the events from first on and, after each, the corrections a checker made at its
+// row, having started with those of the rows before first. On a fresh book that leaves what
+// the checker left, with no orderbook file to read. Each step takes constant time and
+// allocates nothing
+void replay(FeedBook& book, std::span<const Event> events, std::size_t first,
+            const Corrections& corrections);
 
 }  // namespace lob::feed

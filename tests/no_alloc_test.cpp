@@ -7,6 +7,7 @@
 #include <new>
 #include <vector>
 
+#include "Checker.h"
 #include "FeedBook.h"
 #include "Workload.h"
 #include "lob/PriceArray.h"
@@ -131,5 +132,51 @@ TEST(FeedBook, NoAllocationAfterConstruction) {
     EXPECT_EQ(allocs, 0u);
     EXPECT_EQ(resting, 0u);
     EXPECT_EQ(rejected, 3u);
+}
+
+// The checker's reset of a level walks the index and allocates. Repeating it from the keys
+// it dropped doesn't
+TEST(FeedBook, ReplayingCorrectionsDoesNotAllocate) {
+    constexpr Price TICK = 100;
+    constexpr PriceBand BAND{.lo = 0, .hi = 1000};
+    const auto ask = [](const feed::EventType type, const std::uint64_t id, const Qty size,
+                        const Price price) {
+        return feed::Event{
+            .id = id, .size = size, .price = price, .type = type, .side = Side::Sell};
+    };
+    // Order 1's level goes out of view behind order 2, and comes back changed
+    const std::vector<feed::Event> events{
+        ask(feed::EventType::Add, 9, 100, 50'300),
+        ask(feed::EventType::Add, 1, 25, 50'500),
+        ask(feed::EventType::Add, 2, 10, 50'200),
+        ask(feed::EventType::Delete, 2, 10, 50'200),
+    };
+    const std::vector<feed::BookRow> rows{
+        {.asks = {{50'300, 100}, {50'500, 40}}, .bids = {}},
+        {.asks = {{50'300, 100}, {50'500, 65}}, .bids = {}},
+        {.asks = {{50'200, 10}, {50'300, 100}}, .bids = {}},
+        {.asks = {{50'300, 100}, {50'500, 55}}, .bids = {}},
+    };
+    feed::Corrections corrections;
+    {
+        feed::FeedBook checked(16, BAND, TICK);
+        feed::Checker checker(checked, &corrections);
+        for (std::size_t i = 0; i < events.size(); ++i) {
+            if (i > 0) {
+                checked.apply(events[i]);
+            }
+            checker.check(rows[i]);
+        }
+    }
+
+    feed::FeedBook book(16, BAND, TICK);
+    const std::size_t before = g_allocs;
+    feed::replay(book, events, 1, corrections);
+    const std::size_t allocs = g_allocs - before;
+    const Qty back_in_view = book.book().level_qty(Side::Sell, 505);
+    const std::size_t dropped = corrections.dropped.size();
+    EXPECT_EQ(allocs, 0u);
+    EXPECT_EQ(back_in_view, 55);
+    EXPECT_EQ(dropped, 2u);
 }
 }  // namespace

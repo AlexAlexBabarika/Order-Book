@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -234,6 +236,55 @@ TEST(FeedBook, ResettingALevelLeavesOneStandIn) {
     EXPECT_FALSE(book.reset_level(Side::Buy, 49'050, 15));
 }
 
+TEST(FeedBook, ResettingALevelNamesTheOrdersItDropped) {
+    feed::FeedBook book = small_book();
+    book.apply(event(EventType::Add, 1, 30, 50'000, Side::Buy));
+    book.apply(event(EventType::Add, 2, 20, 50'000, Side::Buy));
+    book.apply(event(EventType::Add, 3, 10, 49'900, Side::Buy));
+    std::vector<std::uint64_t> dropped;
+    ASSERT_TRUE(book.reset_level(Side::Buy, 50'000, 40, &dropped));
+    std::sort(dropped.begin(), dropped.end());
+    EXPECT_EQ(dropped, (std::vector<std::uint64_t>{1, 2}));
+
+    // A level that is one stand-in keeps it, so nothing is dropped
+    dropped.clear();
+    ASSERT_TRUE(book.reset_level(Side::Buy, 50'000, 25, &dropped));
+    EXPECT_TRUE(dropped.empty());
+
+    // The stand-in goes with the orders that joined it
+    book.apply(event(EventType::Add, 4, 5, 50'000, Side::Buy));
+    ASSERT_TRUE(book.reset_level(Side::Buy, 50'000, 12, &dropped));
+    EXPECT_EQ(dropped.size(), 2u);
+    EXPECT_EQ(std::count(dropped.begin(), dropped.end(), 4u), 1);
+}
+
+TEST(FeedBook, AResetCanBeRepeatedFromTheOrdersItDropped) {
+    feed::FeedBook first = small_book();
+    feed::FeedBook second = small_book();
+    for (feed::FeedBook* book : {&first, &second}) {
+        ASSERT_TRUE(book->seed(Side::Buy, 50'000, 15));
+        book->apply(event(EventType::Add, 1, 30, 50'000, Side::Buy));
+        book->apply(event(EventType::Add, 2, 20, 50'000, Side::Buy));
+        book->apply(event(EventType::Add, 3, 10, 49'900, Side::Buy));
+    }
+    std::vector<std::uint64_t> dropped;
+    ASSERT_TRUE(first.reset_level(Side::Buy, 50'000, 40, &dropped));
+    ASSERT_TRUE(second.repeat_reset(Side::Buy, 50'000, 40, dropped));
+    ASSERT_TRUE(first.reset_level(Side::Buy, 49'800, 7, &dropped));
+    ASSERT_TRUE(second.repeat_reset(Side::Buy, 49'800, 7, {}));
+
+    for (feed::FeedBook* book : {&first, &second}) {
+        EXPECT_EQ(book->book().level_qty(Side::Buy, 500), 40);
+        EXPECT_EQ(book->book().orders_at(Side::Buy, 500).size(), 1u);
+        EXPECT_EQ(book->book().level_qty(Side::Buy, 499), 10);
+        EXPECT_EQ(book->book().level_qty(Side::Buy, 498), 7);
+        // Order 1 is forgotten in both, so its events come off the stand-in
+        book->apply(event(EventType::Delete, 1, 30, 50'000, Side::Buy));
+        EXPECT_EQ(book->book().level_qty(Side::Buy, 500), 10);
+        EXPECT_EQ(book->book().size(), 3u);
+    }
+}
+
 TEST(Checker, TakesTheFilesWordForWhatItSeesFirstAndChecksItAfterwards) {
     feed::FeedBook book = small_book();
     feed::Checker checker(book);
@@ -336,5 +387,112 @@ TEST(Checker, SkipsLevelsTheBookCannotHold) {
     EXPECT_EQ(checker.synced(), 2u);
     EXPECT_EQ(checker.levels(), 2u);
     EXPECT_EQ(checker.mismatches(), 0u);
+}
+
+// A file two levels deep. Order 1 rests at 50,500, which a better ask then pushes out of view.
+// While it's out, order 1 leaves and 15 more arrive, with no event for either
+struct OutOfView {
+    std::vector<Event> events{
+        event(EventType::Add, 9, 100, 50'300, Side::Sell),  // in the first row already
+        event(EventType::Add, 1, 25, 50'500, Side::Sell),
+        event(EventType::Add, 2, 10, 50'200, Side::Sell),
+        event(EventType::Delete, 2, 10, 50'200, Side::Sell),
+        event(EventType::Delete, 77, 25, 50'500, Side::Sell),
+        event(EventType::Add, 3, 5, 49'900, Side::Buy),
+    };
+    std::vector<feed::BookRow> rows{
+        row({{50'300, 100}, {50'500, 40}}, {{50'000, 30}}),
+        row({{50'300, 100}, {50'500, 65}}, {{50'000, 30}}),
+        row({{50'200, 10}, {50'300, 100}}, {{50'000, 30}}),
+        row({{50'300, 100}, {50'500, 55}}, {{50'000, 30}}),
+        row({{50'300, 100}, {50'500, 30}}, {{50'000, 30}}),
+        row({{50'300, 100}, {50'500, 30}}, {{50'000, 30}, {49'900, 5}}),
+    };
+};
+
+// The quantity at every price the book can hold, bids then asks
+std::vector<Qty> levels_of(const feed::FeedBook& book) {
+    std::vector<Qty> levels;
+    for (const Side side : {Side::Buy, Side::Sell}) {
+        for (Price price = BAND.lo; price < BAND.hi; ++price) {
+            levels.push_back(book.book().level_qty(side, price));
+        }
+    }
+    return levels;
+}
+
+TEST(Checker, RecordsTheChangesItMakes) {
+    const OutOfView file;
+    feed::FeedBook book = small_book();
+    feed::Corrections corrections;
+    feed::Checker checker(book, &corrections);
+    for (std::size_t i = 0; i < file.events.size(); ++i) {
+        if (i > 0) {
+            book.apply(file.events[i]);
+        }
+        checker.check(file.rows[i]);
+    }
+    ASSERT_EQ(checker.mismatches(), 0u);
+
+    // The first row's three levels, 50,500 when it comes back into view, and 49,900 when it
+    // comes into view for the first time
+    ASSERT_EQ(corrections.levels.size(), 5u);
+    for (std::size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(corrections.levels[i].row, 0u);
+        EXPECT_EQ(corrections.levels[i].dropped, 0u);
+    }
+    const feed::Correction& back = corrections.levels[3];
+    EXPECT_EQ(back.row, 3u);
+    EXPECT_EQ(back.side, Side::Sell);
+    EXPECT_EQ(back.price, 50'500);
+    EXPECT_EQ(back.qty, 55);
+    // Order 1 and the stand-in for the 40 that were there before the feed
+    EXPECT_EQ(back.dropped, 2u);
+    EXPECT_EQ(std::count(corrections.dropped.begin(), corrections.dropped.begin() + 2, 1u), 1);
+    // Order 3 is the whole of 49,900, but a price the last row didn't show is never trusted
+    EXPECT_EQ(corrections.levels[4].row, 5u);
+    EXPECT_EQ(corrections.levels[4].dropped, 1u);
+    ASSERT_EQ(corrections.dropped.size(), 3u);
+    EXPECT_EQ(corrections.dropped.back(), 3u);
+}
+
+TEST(Replay, WithTheCorrectionsLeavesTheBookTheCheckerLeft) {
+    const OutOfView file;
+    feed::FeedBook checked = small_book();
+    feed::Corrections corrections;
+    feed::Checker checker(checked, &corrections);
+    for (std::size_t i = 0; i < file.events.size(); ++i) {
+        if (i > 0) {
+            checked.apply(file.events[i]);
+        }
+        checker.check(file.rows[i]);
+    }
+    ASSERT_EQ(checker.mismatches(), 0u);
+
+    feed::FeedBook replayed = small_book();
+    feed::replay(replayed, file.events, 1, corrections);
+    EXPECT_EQ(levels_of(replayed), levels_of(checked));
+    EXPECT_EQ(replayed.book().size(), checked.book().size());
+    EXPECT_EQ(replayed.stats(), checked.stats());
+    EXPECT_EQ(replayed.book().level_qty(Side::Sell, 505), 30);
+
+    // Seeded from the first row and left alone after it, the book still holds order 1
+    feed::FeedBook seeded = small_book();
+    feed::Corrections first_row = corrections;
+    first_row.levels.resize(3);
+    first_row.dropped.clear();
+    feed::replay(seeded, file.events, 1, first_row);
+    EXPECT_EQ(seeded.book().level_qty(Side::Sell, 505), 40);
+}
+
+TEST(Replay, WithoutCorrectionsAppliesEveryEvent) {
+    const OutOfView file;
+    feed::FeedBook book = small_book();
+    feed::replay(book, file.events, 0, {});
+    EXPECT_EQ(book.book().level_qty(Side::Sell, 503), 100);
+    EXPECT_EQ(book.book().level_qty(Side::Sell, 505), 25);
+    EXPECT_EQ(book.book().level_qty(Side::Buy, 499), 5);
+    EXPECT_EQ(book.stats().applied, 5u);
+    EXPECT_EQ(book.stats().unknown, 1u);
 }
 }  // namespace

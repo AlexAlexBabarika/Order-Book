@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
+#include <vector>
 
 #include "Lobster.h"
 
@@ -17,6 +19,8 @@ struct Stats {
     std::size_t ignored = 0;
     std::size_t unknown = 0;   // named an order the book doesn't hold
     std::size_t rejected = 0;  // adds turned away: off the tick, out of band, or the book is full
+
+    bool operator==(const Stats&) const = default;
 };
 
 // A book built from a feed. The feed names orders by its own ids, and the book hands out its
@@ -37,8 +41,14 @@ class FeedBook {
     // Replaces every order at the price with one stand-in for qty, or with nothing if qty is
     // 0. For a level that may have changed where the feed doesn't report, so that which of
     // its orders are still there can't be known. Unless the level already is one stand-in, it
-    // walks the whole index and allocates
-    bool reset_level(Side side, Price feed_price, Qty qty);
+    // walks the whole index and allocates. dropped, if given, gets the index's key for each
+    // order it took out
+    bool reset_level(Side side, Price feed_price, Qty qty,
+                     std::vector<std::uint64_t>* dropped = nullptr);
+    // A reset_level() over again, on a book in the state the first one found, from the keys
+    // that one dropped. It takes those orders out by key, so it neither walks the index nor
+    // allocates
+    bool repeat_reset(Side side, Price feed_price, Qty qty, std::span<const std::uint64_t> dropped);
 
     // Nothing if the price isn't a whole number of ticks
     std::optional<Price> to_ticks(const Price feed_price) const {

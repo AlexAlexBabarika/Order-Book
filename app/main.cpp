@@ -9,6 +9,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Checker.h"
@@ -45,19 +46,39 @@ PriceBand band_around(const std::vector<feed::Event>& events) {
 
 const char* name(const Side side) { return side == Side::Buy ? "bid" : "ask"; }
 
-void print(const feed::Stats& stats, const OrderBook& book) {
+// What a replay did with the events, and what it left in the book
+struct Outcome {
+    feed::Stats stats;
+    std::size_t resting = 0;
+
+    bool operator==(const Outcome&) const = default;
+};
+
+Outcome outcome_of(const feed::FeedBook& book) {
+    return {.stats = book.stats(), .resting = book.book().size()};
+}
+
+void print(const Outcome& outcome) {
+    const feed::Stats& stats = outcome.stats;
     std::cout << "applied " << stats.applied << ", ignored " << stats.ignored << ", unknown id "
-              << stats.unknown << ", rejected " << stats.rejected << "; " << book.size()
+              << stats.unknown << ", rejected " << stats.rejected << "; " << outcome.resting
               << " orders resting at the end\n";
 }
 
-// False if the book ever differed from the file
-bool check(const std::vector<feed::Event>& events, const PriceBand band,
-           const std::string& book_path) {
+struct Checked {
+    bool matches;  // false if the book ever differed from the file
+    Outcome outcome;
+    // What the checker changed to keep the book in line with the file, for the timed runs
+    feed::Corrections corrections;
+};
+
+Checked check(const std::vector<feed::Event>& events, const PriceBand band,
+              const std::string& book_path) {
     std::ifstream in = open(book_path);
     feed::RowReader rows(in);
     feed::FeedBook book(MAX_ORDERS, band, TICK);
-    feed::Checker checker(book);
+    feed::Corrections corrections;
+    feed::Checker checker(book, &corrections);
     feed::BookRow row;
     for (std::size_t i = 0; i < events.size(); ++i) {
         if (!rows.next(row)) {
@@ -78,35 +99,28 @@ bool check(const std::vector<feed::Event>& events, const PriceBand band,
                   << first->price << ": file has " << first->expected << ", book has "
                   << first->actual << "\n";
     }
-    print(book.stats(), book.book());
-    return checker.mismatches() == 0;
+    const Outcome outcome = outcome_of(book);
+    print(outcome);
+    return {.matches = checker.mismatches() == 0,
+            .outcome = outcome,
+            .corrections = std::move(corrections)};
 }
 
-// Nanoseconds per event. With an orderbook file, the book starts from its first row, so the
-// orders older than the feed are there to be cancelled and traded
-double time_replay(const std::vector<feed::Event>& events, const PriceBand band,
-                   const std::optional<std::string>& book_path, const bool report) {
-    feed::FeedBook book(MAX_ORDERS, band, TICK);
-    std::size_t from = 0;
-    if (book_path) {
-        std::ifstream in = open(*book_path);
-        feed::BookRow row;
-        if (feed::RowReader(in).next(row)) {
-            feed::Checker(book).check(row);
-            from = 1;
-        }
-    }
+struct Timed {
+    double ns;  // for the whole replay
+    Outcome outcome;
+};
 
+// The events from first on, with the corrections of a checked run in among them. Those are
+// timed too: without them the book drifts from the file wherever a level changed out of view
+Timed time_replay(const std::vector<feed::Event>& events, const PriceBand band,
+                  const std::size_t first, const feed::Corrections& corrections) {
+    feed::FeedBook book(MAX_ORDERS, band, TICK);
     const auto start = std::chrono::steady_clock::now();
-    for (std::size_t i = from; i < events.size(); ++i) {
-        book.apply(events[i]);
-    }
+    feed::replay(book, events, first, corrections);
     const std::chrono::duration<double, std::nano> elapsed =
         std::chrono::steady_clock::now() - start;
-    if (report) {
-        print(book.stats(), book.book());
-    }
-    return elapsed.count() / static_cast<double>(events.size() - from);
+    return {.ns = elapsed.count(), .outcome = outcome_of(book)};
 }
 
 int run(const std::string& message_path, const std::optional<std::string>& book_path) {
@@ -122,18 +136,33 @@ int run(const std::string& message_path, const std::optional<std::string>& book_
               << " reductions, " << by_type[3] << " deletions, " << by_type[4] << " executions, "
               << by_type[5] + by_type[6] + by_type[7] << " other\n";
 
-    const bool matches = !book_path || check(events, band, *book_path);
+    const std::optional<Checked> checked =
+        book_path ? std::optional<Checked>(check(events, band, *book_path)) : std::nullopt;
+    const feed::Corrections none;
+    const feed::Corrections& corrections = checked ? checked->corrections : none;
+    // The first row of an orderbook file seeds the book, and it already holds the first event
+    const std::size_t first = checked ? 1 : 0;
+    // A step is an event, an order a correction takes out, or the level it leaves
+    const std::size_t corrected = corrections.levels.size() + corrections.dropped.size();
+    const auto steps = static_cast<double>(events.size() - first + corrected);
 
     std::array<double, TIMED_RUNS> runs{};
     for (int i = 0; i < TIMED_RUNS; ++i) {
+        const Timed timed = time_replay(events, band, first, corrections);
+        runs[static_cast<std::size_t>(i)] = timed.ns / steps;
+        if (checked && timed.outcome != checked->outcome) {
+            throw std::runtime_error("the timed replay left a different book from the checked one");
+        }
         // check() has printed the book's counts if there's an orderbook file
-        runs[static_cast<std::size_t>(i)] =
-            time_replay(events, band, book_path, !book_path && i == 0);
+        if (!checked && i == 0) {
+            print(timed.outcome);
+        }
     }
     std::sort(runs.begin(), runs.end());
-    std::cout << "replay: " << runs[TIMED_RUNS / 2] << " ns per event (median of " << TIMED_RUNS
+    std::cout << "replay: " << events.size() - first << " events and " << corrected
+              << " corrections, " << runs[TIMED_RUNS / 2] << " ns each (median of " << TIMED_RUNS
               << " runs, best " << runs.front() << ")\n";
-    return matches ? 0 : 1;
+    return !checked || checked->matches ? 0 : 1;
 }
 }  // namespace
 

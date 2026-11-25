@@ -3,6 +3,8 @@
 #include <cassert>
 #include <cstddef>
 #include <optional>
+#include <span>
+#include <vector>
 
 namespace lob::feed {
 
@@ -115,7 +117,8 @@ bool FeedBook::seed(const Side side, const Price feed_price, const Qty qty) {
     return true;
 }
 
-bool FeedBook::reset_level(const Side side, const Price feed_price, const Qty qty) {
+bool FeedBook::reset_level(const Side side, const Price feed_price, const Qty qty,
+                           std::vector<std::uint64_t>* const dropped) {
     const std::optional<Price> ticks = to_ticks(feed_price);
     if (!ticks) {
         return false;
@@ -136,10 +139,26 @@ bool FeedBook::reset_level(const Side side, const Price feed_price, const Qty qt
         for (const OrderId id : book_.orders_at(side, *ticks)) {
             book_.cancel(id);
         }
-        std::erase_if(index_,
-                      [this](const auto& entry) { return !book_.contains(entry.second.id); });
+        std::erase_if(index_, [this, dropped](const auto& entry) {
+            const bool gone = !book_.contains(entry.second.id);
+            if (gone && dropped != nullptr) {
+                dropped->push_back(entry.first);
+            }
+            return gone;
+        });
     }
     return qty == 0 || seed(side, feed_price, qty);
+}
+
+bool FeedBook::repeat_reset(const Side side, const Price feed_price, const Qty qty,
+                            const std::span<const std::uint64_t> dropped) {
+    for (const std::uint64_t key : dropped) {
+        if (const auto it = index_.find(key); it != index_.end()) {
+            remove(it);
+        }
+    }
+    // What's left at the price is nothing or one stand-in, and reset_level() does both in place
+    return reset_level(side, feed_price, qty);
 }
 
 }  // namespace lob::feed

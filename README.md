@@ -118,9 +118,13 @@ no data is in the repo.
   09:30 are never named, and a level that drops out of view changes with no event. The
   checker takes the file's quantity for a price the previous row didn't show, as one
   stand-in order, and compares every price the previous row did show.
-- **The timed runs don't check**, so they only start from the file's first row. Levels that
-  change out of view are then never corrected: on the AMZN sample 2.5% of events name
-  orders the book doesn't have, and about 8,300 orders are left resting instead of 437.
+- **The timed runs replay the checker's corrections.** The checked run records every change
+  the checker makes to the book, and the timed runs make each one after the same event, so
+  they work on the same book without reading the orderbook file. A correction is timed as
+  one step for each order it takes out and one for the level it leaves, each in constant
+  time. `lob_app` exits with 2 if a timed run's counts differ from the checked run's.
+  Seeded from the first row alone, the AMZN sample's book drifted: 2.5% of events named
+  orders it didn't have, and about 8,300 orders were left resting instead of 437.
 - Prices are taken as whole cents, in a band 65,536 cents wide around the first order.
   Anything else is counted as rejected, or skipped by the checker.
 

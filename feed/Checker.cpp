@@ -1,7 +1,9 @@
 #include "Checker.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
+#include <span>
 
 namespace lob::feed {
 
@@ -68,8 +70,18 @@ void Checker::sync(const Side side, const Price feed_price, const Qty qty) {
     if (known == 0 && qty == 0) {
         return;
     }
-    const bool done =
-        known == 0 ? book_.seed(side, feed_price, qty) : book_.reset_level(side, feed_price, qty);
+    std::vector<std::uint64_t>* const dropped =
+        corrections_ == nullptr ? nullptr : &corrections_->dropped;
+    const std::size_t before = dropped == nullptr ? 0 : dropped->size();
+    const bool done = known == 0 ? book_.seed(side, feed_price, qty)
+                                 : book_.reset_level(side, feed_price, qty, dropped);
+    if (corrections_ != nullptr) {
+        corrections_->levels.push_back({.row = rows_,
+                                        .side = side,
+                                        .price = feed_price,
+                                        .qty = qty,
+                                        .dropped = dropped->size() - before});
+    }
     if (!done) {
         expect(side, feed_price, qty, known);
     } else if (known != qty) {
@@ -89,6 +101,28 @@ void Checker::expect(const Side side, const Price feed_price, const Qty expected
                   .price = feed_price,
                   .expected = expected,
                   .actual = actual};
+    }
+}
+
+void replay(FeedBook& book, const std::span<const Event> events, const std::size_t first,
+            const Corrections& corrections) {
+    auto level = corrections.levels.begin();
+    const std::span<const std::uint64_t> dropped = corrections.dropped;
+    std::size_t taken = 0;
+    const auto correct_up_to = [&](const std::size_t row) {
+        for (; level != corrections.levels.end() && level->row <= row; ++level) {
+            book.repeat_reset(level->side, level->price, level->qty,
+                              dropped.subspan(taken, level->dropped));
+            taken += level->dropped;
+        }
+    };
+
+    if (first > 0) {
+        correct_up_to(first - 1);
+    }
+    for (std::size_t row = first; row < events.size(); ++row) {
+        book.apply(events[row]);
+        correct_up_to(row);
     }
 }
 
